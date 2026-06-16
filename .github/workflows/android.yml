@@ -14,7 +14,7 @@ jobs:
       - name: Validate Gradle Wrapper
         uses: gradle/actions/wrapper-validation@v6
         with:
-          allow-checksums: a5e75118d96b4eac2100876f6af6a5ca5029cd440f87736425350fb4cf308b42,fbd8f66b83e1a46057f8fdd98e734c2c077aab78daf2c1f7bf29808fcd740b74
+          allow-checksums: b3a875ddc1f044746e1b1a55f645584505f4a10438c1afea9f15e92a7c42ec13,a5e75118d96b4eac2100876f6af6a5ca5029cd440f87736425350fb4cf308b42,fbd8f66b83e1a46057f8fdd98e734c2c077aab78daf2c1f7bf29808fcd740b74
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
