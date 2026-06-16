@@ -46,6 +46,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isTestingPing = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
     val isTestingPing: StateFlow<Map<Long, Boolean>> = _isTestingPing.asStateFlow()
 
+    // Background optimizer service active status and launcher toggle
+    val isAutoConnectActive: StateFlow<Boolean> = com.example.service.AutoConnectService.isServiceActive
+
+    fun toggleAutoConnect() {
+        val context = getApplication<Application>()
+        val intent = android.content.Intent(context, com.example.service.AutoConnectService::class.java)
+        if (isAutoConnectActive.value) {
+            context.stopService(intent)
+        } else {
+            context.startService(intent)
+        }
+    }
+
     // Preferences configuration (Saved locally inside DB or simple local memory)
     private val _routingMode = MutableStateFlow("Bypass LAN & Mainland") // Bypass LAN & Mainland, Global, Direct
     val routingMode: StateFlow<String> = _routingMode.asStateFlow()

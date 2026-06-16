@@ -73,6 +73,78 @@ fun SettingsScreen(
             )
         }
 
+        // Section 0: Background Latency Optimizer Service
+        Text(
+            text = "AUTOMATIC OPTIMIZATION SERVICE",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = CyberCyan,
+            letterSpacing = 0.5.sp
+        )
+
+        val isAutoConnectActive by viewModel.isAutoConnectActive.collectAsState()
+
+        Card(
+            modifier = Modifier.fillMaxWidth().testTag("auto_connect_card"),
+            colors = CardDefaults.cardColors(containerColor = SlateSurface),
+            border = BorderStroke(1.dp, SlateBorder),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-Select Lowest Latency",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isAutoConnectActive) CyberGreen else SlateTextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Background service pings all nodes round-robin every 20 seconds and selects the optimal lowest-latency route dynamically.",
+                        fontSize = 11.sp,
+                        color = SlateTextSecondary
+                    )
+                    if (isAutoConnectActive) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(ElegantGreen, CircleShape)
+                            )
+                            Text(
+                                text = "Optimizer background service: ACTIVE",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ElegantGreen
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = isAutoConnectActive,
+                    onCheckedChange = { viewModel.toggleAutoConnect() },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = ActiveButtonBg,
+                        checkedTrackColor = CyberGreen,
+                        uncheckedThumbColor = SlateTextSecondary,
+                        uncheckedTrackColor = SlateCard
+                    ),
+                    modifier = Modifier.testTag("auto_connect_switch")
+                )
+            }
+        }
+
         // Section 1: Proxy Routing Rules
         Text(
             text = "PROXY ROUTING STRATEGY",

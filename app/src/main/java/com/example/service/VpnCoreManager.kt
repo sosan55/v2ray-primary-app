@@ -27,6 +27,14 @@ data class SpeedState(
 class VpnCoreManager(private val repository: V2RayRepository) {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     
+    init {
+        activeVpnCoreManager = this
+    }
+
+    companion object {
+        var activeVpnCoreManager: VpnCoreManager? = null
+    }
+    
     private val _vpnState = MutableStateFlow(VpnState.DISCONNECTED)
     val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
 

@@ -45,6 +45,7 @@ fun HomeScreen(
     val activeServer by viewModel.activeServer.collectAsState()
     val durationSec by viewModel.connectionDuration.collectAsState()
     val routingMode by viewModel.routingMode.collectAsState()
+    val isAutoConnectActive by viewModel.isAutoConnectActive.collectAsState()
 
     Column(
         modifier = modifier
@@ -96,7 +97,8 @@ fun HomeScreen(
         SelectedNodeCard(
             activeServer = activeServer,
             onClick = onNavigateToServers,
-            routingMode = routingMode
+            routingMode = routingMode,
+            isAutoConnectActive = isAutoConnectActive
         )
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -404,7 +406,8 @@ fun SpeedMeterGrid(speedState: SpeedState) {
 fun SelectedNodeCard(
     activeServer: ServerEntity?,
     onClick: () -> Unit,
-    routingMode: String
+    routingMode: String,
+    isAutoConnectActive: Boolean
 ) {
     Card(
         modifier = Modifier
@@ -442,13 +445,32 @@ fun SelectedNodeCard(
             Column(
                 modifier = Modifier.weight(1f)
             ) {
-                Text(
-                    text = "ACTIVE GATEWAY",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = SlateTextSecondary,
-                    letterSpacing = 1.sp
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "ACTIVE GATEWAY",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = SlateTextSecondary,
+                        letterSpacing = 1.sp
+                    )
+                    if (isAutoConnectActive) {
+                        Box(
+                            modifier = Modifier
+                                .size(5.dp)
+                                .background(ElegantGreen, CircleShape)
+                        )
+                        Text(
+                            text = "AUTO-SELECTOR",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ElegantGreen,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                }
                 Text(
                     text = activeServer?.name ?: "No Node Selected",
                     fontSize = 15.sp,
