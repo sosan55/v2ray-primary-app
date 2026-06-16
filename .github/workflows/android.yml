@@ -2,9 +2,7 @@ name: Android Build & Test
 
 on:
   push:
-    branches: [ "main", "master", "develop" ]
   pull_request:
-    branches: [ "main", "master", "develop" ]
 
 jobs:
   build:
@@ -57,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
 
@@ -65,6 +63,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 7
