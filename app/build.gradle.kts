@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -22,17 +24,41 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      val base64Keystore = System.getenv("KEYSTORE_BASE64")
+      val keystorePath = if (!base64Keystore.isNullOrBlank()) {
+        val tempKeystore = file("${rootDir}/build/release.keystore")
+        tempKeystore.parentFile.mkdirs()
+        tempKeystore.writeBytes(Base64.getMimeDecoder().decode(base64Keystore.trim()))
+        tempKeystore.absolutePath
+      } else {
+        System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      }
       storeFile = file(keystorePath)
       storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
+      keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      val keystore = file("${rootDir}/debug.keystore")
+      if (keystore.exists()) {
+        storeFile = keystore
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      } else {
+        try {
+          val builtInDebug = signingConfigs.getByName("debug")
+          storeFile = builtInDebug.storeFile
+          storePassword = builtInDebug.storePassword
+          keyAlias = builtInDebug.keyAlias
+          keyPassword = builtInDebug.keyPassword
+        } catch (_: Exception) {
+          storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+          storePassword = "android"
+          keyAlias = "androiddebugkey"
+          keyPassword = "android"
+        }
+      }
     }
   }
 
@@ -42,9 +68,10 @@ android {
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       
+      val base64Keystore = System.getenv("KEYSTORE_BASE64")
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       val keystoreFile = file(keystorePath)
-      if (keystoreFile.exists() && System.getenv("STORE_PASSWORD") != null) {
+      if ((keystoreFile.exists() || !base64Keystore.isNullOrBlank()) && System.getenv("STORE_PASSWORD") != null) {
         signingConfig = signingConfigs.getByName("release")
       } else {
         signingConfig = signingConfigs.getByName("debugConfig")
