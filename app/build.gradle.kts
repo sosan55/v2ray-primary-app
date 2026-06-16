@@ -1,5 +1,13 @@
 import java.util.Base64
 
+// --- بخش تضمین‌کننده برای حل مشکل local.properties در گیت‌هاب ---
+val localProperties = file("local.properties")
+if (!localProperties.exists()) {
+    localProperties.createNewFile()
+    localProperties.writeText("sdk.dir=/home/runner/android/sdk")
+}
+// -------------------------------------------------------------
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -10,7 +18,7 @@ plugins {
 
 android {
     namespace = "com.example"
-    compileSdk = 36 // اصلاح شده: استفاده از مقدار صحیح
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.aistudio.v2raydan.kqtxwp"
@@ -38,7 +46,6 @@ android {
         }
         
         create("debugConfig") {
-            // در CI، اگر فایل وجود ندارد، اجازه نده بیلد متوقف شود (استفاده از تنظیمات پیش‌فرض)
             val keystore = file("${rootDir}/debug.keystore")
             if (keystore.exists()) {
                 storeFile = keystore
@@ -55,7 +62,6 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             
-            // اگر تمام متغیرهای ریلیز ست شده باشند، امضا کن، وگرنه از دیباگ استفاده کن
             if (!System.getenv("KEYSTORE_BASE64").isNullOrBlank() || System.getenv("STORE_PASSWORD") != null) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
