@@ -25,19 +25,16 @@ jobs:
       - name: Copy Env Example for Build Resiliency
         run: cp .env.example .env
 
-      - name: Grant Execute Permission for Gradlew
-        run: chmod +x gradlew
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          validate-wrappers: false
+          gradle-version: 9.3.1
 
       - name: Run Unit & Robolectric Tests
-        run: ./gradlew testDebugUnitTest
+        run: gradle testDebugUnitTest
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug
+        run: gradle assembleDebug
 
       - name: Upload Build Artifacts (Debug APK)
         uses: actions/upload-artifact@v4
