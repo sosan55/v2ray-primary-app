@@ -33,7 +33,6 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 9.0
           validate-wrappers: false
 
       - name: Make Gradlew Executable
