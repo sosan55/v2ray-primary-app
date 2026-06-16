@@ -29,19 +29,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
-          validate-wrappers: false
+          validate-wrappers: true
 
       - name: Make Gradlew Executable
         run: chmod +x gradlew
 
       - name: Run Unit & Robolectric Tests
-        run: gradle testDebugUnitTest
+        run: ./gradlew testDebugUnitTest
 
       - name: Build Debug APK
-        run: gradle assembleDebug
+        run: ./gradlew assembleDebug
 
       - name: Build Release APK
-        run: gradle assembleRelease
+        run: ./gradlew assembleRelease
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
