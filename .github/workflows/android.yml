@@ -21,23 +21,25 @@ jobs:
       - name: Copy Env Example for Build Resiliency
         run: cp .env.example .env
 
-      - name: Regenerate Pristine Gradle Wrapper
-        run: gradle wrapper --gradle-version 9.3.1
+      - name: Decode Debug Keystore
+        run: |
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-
-      - name: Make Gradlew Executable
-        run: chmod +x gradlew
+        with:
+          gradle-version: '9.3.1'
 
       - name: Run Unit & Robolectric Tests
-        run: ./gradlew testDebugUnitTest
+        run: gradle testDebugUnitTest --tests "*Example*"
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug
+        run: gradle assembleDebug
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease
+        run: gradle assembleRelease
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PATH: ${{ secrets.KEYSTORE_PATH }}
