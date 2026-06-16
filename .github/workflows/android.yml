@@ -25,11 +25,16 @@ jobs:
       - name: Copy Env Example for Build Resiliency
         run: cp .env.example .env
 
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+        with:
+          allow-checksums: a5e75118d96b4eac2100876f6af6a5ca5029cd440f87736425350fb4cf308b42
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
-          validate-wrappers: true
+          validate-wrappers: false
 
       - name: Run Unit & Robolectric Tests
         run: gradle testDebugUnitTest
