@@ -58,11 +58,10 @@ class V2RayVpnService : VpnService() {
         // Establish real system-wide VPN tunnel
         try {
             val builder = Builder()
-                .setSession("V2Ray Dan Session")
-                // Setup default tunnel routes
-                .addAddress("10.8.0.2", 32)
-                .addRoute("0.0.0.0", 0)
-                .addDnsServer("1.1.1.1")
+                .setSession("V2RayDan")
+                .addAddress("10.0.0.2", 24) // آیپی داخلی تونل
+                .addRoute("0.0.0.0", 0)    // این خط حیاتی است (ترافیک جهانی را میفرستد به تونل)
+                .addDnsServer("8.8.8.8")   // تنظیم DNS برای جلوگیری از نشت IP
                 .setMtu(1500)
 
             interfaceDescriptor = builder.establish()
