@@ -2,6 +2,7 @@ package com.example.service
 
 import android.content.Context
 import android.content.Intent
+import android.net.TrafficStats
 import android.os.Build
 import com.example.data.ServerEntity
 import com.example.data.V2RayRepository
@@ -10,7 +11,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
-import kotlin.random.Random
 
 enum class VpnState {
     DISCONNECTED,
@@ -50,7 +50,7 @@ class VpnCoreManager(private val context: Context, private val repository: V2Ray
     private val _connectedServer = MutableStateFlow<ServerEntity?>(null)
     val connectedServer: StateFlow<ServerEntity?> = _connectedServer.asStateFlow()
 
-    private var simulatorJob: Job? = null
+    private var trafficJob: Job? = null
     private var durationJob: Job? = null
 
     fun toggleVpn(server: ServerEntity?) {
@@ -73,127 +73,102 @@ class VpnCoreManager(private val context: Context, private val repository: V2Ray
         _connectedServer.value = server
         _connectionDuration.value = 0L
 
-        scope.launch {
-            repository.log("VPN", "INFO", "Initiating handshake sequence...")
-            delay(300)
-            
-            // Start actual VpnService
-            try {
-                val intent = Intent(context, V2RayVpnService::class.java).apply {
-                    action = V2RayVpnService.ACTION_START
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-            } catch (e: Exception) {
-                repository.log("VPN-SERVICE", "ERROR", "Failed to start standard VpnService: ${e.localizedMessage}")
+        // Trigger real foreground service
+        try {
+            val intent = Intent(context, V2RayVpnService::class.java).apply {
+                action = V2RayVpnService.ACTION_START
             }
-
-            repository.log("V2RAY-CORE", "INFO", "V2Ray core v5.14.2 starting daemon process...")
-            delay(250)
-            repository.log("V2RAY-CORE", "INFO", "Loading configuration format v5. Outbound set to: [${server.type}] ${server.name}")
-            delay(300)
-            repository.log("VPN-SERVICE", "INFO", "Allocating local TUN device file descriptor...")
-            delay(200)
-            repository.log("VPN-SERVICE", "INFO", "Interface config: IP 10.254.0.2/30, MTU 1500, Route global out")
-            delay(350)
-            repository.log("V2RAY-CORE", "INFO", "Establishing security layer: protocol encryption=${server.security}, tls=${server.tls}")
-            if (server.tls) {
-                repository.log("TLS-HANDSHAKE", "INFO", "Server SNI check: '${server.sni.ifEmpty { server.address }}' valid. Certificate status OK.")
-                delay(250)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
             }
-            repository.log("TUNNEL", "SUCCESS", "TCP local outbound handshake completed with remote port ${server.port}.")
-            repository.log("VPN", "SUCCESS", "V2Ray tunnel is core established. Local proxy listening on 127.0.0.1:10808")
-            
-            _vpnState.value = VpnState.CONNECTED
-            startSpeedAndTimerSimulator()
+        } catch (e: Exception) {
+            scope.launch {
+                repository.log("VPN-SERVICE", "ERROR", "Failed to start real VPN service: ${e.localizedMessage}")
+            }
+            _vpnState.value = VpnState.ERROR
         }
     }
 
     fun stopVpn() {
         if (_vpnState.value == VpnState.DISCONNECTED) return
-        
         _vpnState.value = VpnState.DISCONNECTING
-        stopSpeedAndTimerSimulator()
+        stopTracking()
 
-        scope.launch {
-            repository.log("VPN", "INFO", "Tearing down remote VPN tunnel session...")
-            
-            // Stop actual VpnService
-            try {
-                val intent = Intent(context, V2RayVpnService::class.java).apply {
-                    action = V2RayVpnService.ACTION_STOP
-                }
-                context.startService(intent)
-            } catch (e: Exception) {
-                repository.log("VPN-SERVICE", "ERROR", "Failed to stop standard VpnService: ${e.localizedMessage}")
+        // Terminate foreground service
+        try {
+            val intent = Intent(context, V2RayVpnService::class.java).apply {
+                action = V2RayVpnService.ACTION_STOP
             }
-
-            delay(200)
-            repository.log("VPN-SERVICE", "INFO", "Releasing tun0 interface descriptor and resetting routes...")
-            delay(150)
-            repository.log("V2RAY-CORE", "WARNING", "V2Ray daemon shutdown code complete.")
-            repository.log("VPN", "INFO", "Stopped. Connection closed gracefully.")
-            
-            _vpnState.value = VpnState.DISCONNECTED
-            _connectedServer.value = null
-            _connectionDuration.value = 0L
-            _speedState.value = SpeedState()
+            context.startService(intent)
+        } catch (e: Exception) {
+            scope.launch {
+                repository.log("VPN-SERVICE", "ERROR", "Failed to issue shutdown command: ${e.localizedMessage}")
+            }
         }
     }
 
-    private fun startSpeedAndTimerSimulator() {
-        stopSpeedAndTimerSimulator()
+    fun updateState(state: VpnState) {
+        _vpnState.value = state
+    }
 
-        // Speed Simulator
-        simulatorJob = scope.launch {
-            var totalDownBytes = 0L
-            var totalUpBytes = 0L
-            while (isActive) {
-                // Generate realistic fluctuations
-                val isDownloading = Random.nextFloat() > 0.2 // 80% chance of active flow
-                val downSpeedBytes = if (isDownloading) {
-                    if (Random.nextFloat() > 0.8) Random.nextLong(1_500_000, 6_800_000) // high burst
-                    else Random.nextLong(45_000, 450_000) // standard speed
-                } else {
-                    Random.nextLong(300, 2500) // trickle background ping
-                }
+    fun setConnectedServer(server: ServerEntity?) {
+        _connectedServer.value = server
+    }
 
-                val upSpeedBytes = if (isDownloading) {
-                    downSpeedBytes / Random.nextLong(10, 25)
-                } else {
-                    Random.nextLong(150, 1200)
-                }
+    fun startTracking() {
+        stopTracking()
 
-                totalDownBytes += downSpeedBytes
-                totalUpBytes += upSpeedBytes
-
-                _speedState.value = SpeedState(
-                    downloadSpeed = formatSpeed(downSpeedBytes),
-                    uploadSpeed = formatSpeed(upSpeedBytes),
-                    rawDownBytes = totalDownBytes,
-                    rawUpBytes = totalUpBytes
-                )
-                delay(1000)
-            }
-        }
-
-        // Active Connection Timer
+        // 1. Durational tracking loop
         durationJob = scope.launch {
             while (isActive) {
                 delay(1000)
                 _connectionDuration.value += 1
             }
         }
+
+        // 2. Real byte flow query using TrafficStats
+        trafficJob = scope.launch {
+            val uid = context.applicationInfo.uid
+            var lastRxBytes = TrafficStats.getUidRxBytes(uid)
+            var lastTxBytes = TrafficStats.getUidTxBytes(uid)
+            if (lastRxBytes == TrafficStats.UNSUPPORTED.toLong()) lastRxBytes = 0
+            if (lastTxBytes == TrafficStats.UNSUPPORTED.toLong()) lastTxBytes = 0
+
+            val baseRx = lastRxBytes
+            val baseTx = lastTxBytes
+
+            while (isActive) {
+                delay(1000)
+                var currentRxBytes = TrafficStats.getUidRxBytes(uid)
+                var currentTxBytes = TrafficStats.getUidTxBytes(uid)
+                if (currentRxBytes == TrafficStats.UNSUPPORTED.toLong()) currentRxBytes = 0
+                if (currentTxBytes == TrafficStats.UNSUPPORTED.toLong()) currentTxBytes = 0
+
+                val downloadDelta = if (currentRxBytes >= lastRxBytes) currentRxBytes - lastRxBytes else 0L
+                val uploadDelta = if (currentTxBytes >= lastTxBytes) currentTxBytes - lastTxBytes else 0L
+
+                lastRxBytes = currentRxBytes
+                lastTxBytes = currentTxBytes
+
+                _speedState.value = SpeedState(
+                    downloadSpeed = formatSpeed(downloadDelta),
+                    uploadSpeed = formatSpeed(uploadDelta),
+                    rawDownBytes = if (currentRxBytes >= baseRx) currentRxBytes - baseRx else 0L,
+                    rawUpBytes = if (currentTxBytes >= baseTx) currentTxBytes - baseTx else 0L
+                )
+            }
+        }
     }
 
-    private fun stopSpeedAndTimerSimulator() {
-        simulatorJob?.cancel()
-        simulatorJob = null
+    fun stopTracking() {
+        trafficJob?.cancel()
+        trafficJob = null
         durationJob?.cancel()
         durationJob = null
+        _connectionDuration.value = 0L
+        _speedState.value = SpeedState()
     }
 
     private fun formatSpeed(bytesPerSec: Long): String {
@@ -211,7 +186,7 @@ class VpnCoreManager(private val context: Context, private val repository: V2Ray
     }
 
     fun cleanUp() {
-        stopSpeedAndTimerSimulator()
+        stopTracking()
         scope.cancel()
     }
 }
