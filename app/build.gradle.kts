@@ -25,13 +25,14 @@ android {
   signingConfigs {
     create("release") {
       val base64Keystore = System.getenv("KEYSTORE_BASE64")
+      val keystorePathEnv = System.getenv("KEYSTORE_PATH")
       val keystorePath = if (!base64Keystore.isNullOrBlank()) {
         val tempKeystore = file("${rootDir}/build/release.keystore")
         tempKeystore.parentFile.mkdirs()
         tempKeystore.writeBytes(Base64.getMimeDecoder().decode(base64Keystore.trim()))
         tempKeystore.absolutePath
       } else {
-        System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+        if (!keystorePathEnv.isNullOrBlank()) keystorePathEnv else "${rootDir}/my-upload-key.jks"
       }
       storeFile = file(keystorePath)
       storePassword = System.getenv("STORE_PASSWORD")
@@ -69,9 +70,10 @@ android {
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       
       val base64Keystore = System.getenv("KEYSTORE_BASE64")
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      val keystorePathEnv = System.getenv("KEYSTORE_PATH")
+      val keystorePath = if (!keystorePathEnv.isNullOrBlank()) keystorePathEnv else "${rootDir}/my-upload-key.jks"
       val keystoreFile = file(keystorePath)
-      if ((keystoreFile.exists() || !base64Keystore.isNullOrBlank()) && System.getenv("STORE_PASSWORD") != null) {
+      if ((keystoreFile.exists() || !base64Keystore.isNullOrBlank()) && !System.getenv("STORE_PASSWORD").isNullOrBlank()) {
         signingConfig = signingConfigs.getByName("release")
       } else {
         signingConfig = signingConfigs.getByName("debugConfig")
