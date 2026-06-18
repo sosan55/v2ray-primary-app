@@ -10,8 +10,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.screens.MainAppContainer
 import com.example.ui.screens.MainViewModel
 import com.example.ui.theme.MyApplicationTheme
@@ -36,13 +36,14 @@ class MainActivity : ComponentActivity() {
         // Fully support full-screen edge-to-edge transparent drawing and custom system colors
         enableEdgeToEdge()
         
+        mainViewModel = ViewModelProvider(this)[MainViewModel::class.java]
+        
         setContent {
             MyApplicationTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = com.example.ui.theme.SlateDark
                 ) {
-                    mainViewModel = viewModel()
                     MainAppContainer(viewModel = mainViewModel)
                 }
             }
