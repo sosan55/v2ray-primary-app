@@ -18,7 +18,11 @@ import kotlinx.coroutines.launch
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val database = V2RayDatabase.getDatabase(application)
     val repository = V2RayRepository(database)
-    val vpnCoreManager = VpnCoreManager(repository)
+    val vpnCoreManager = VpnCoreManager(application, repository)
+
+    // Flow for VPN integration requests from MainActivity
+    private val _vpnPermissionRequest = MutableSharedFlow<android.content.Intent>(extraBufferCapacity = 1)
+    val vpnPermissionRequest = _vpnPermissionRequest.asSharedFlow()
 
     // Data flows from DB
     val servers: StateFlow<List<ServerEntity>> = repository.allServers
@@ -116,6 +120,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleVpn() {
+        viewModelScope.launch {
+            val isRunning = vpnState.value == VpnState.CONNECTED || vpnState.value == VpnState.CONNECTING
+            if (isRunning) {
+                vpnCoreManager.stopVpn()
+            } else {
+                val currentActive = activeServer.value
+                val context = getApplication<Application>()
+                val vpnIntent = android.net.VpnService.prepare(context)
+                if (vpnIntent != null) {
+                    _vpnPermissionRequest.tryEmit(vpnIntent)
+                } else {
+                    vpnCoreManager.toggleVpn(currentActive)
+                }
+            }
+        }
+    }
+
+    fun toggleVpnAfterPermission() {
         viewModelScope.launch {
             val currentActive = activeServer.value
             vpnCoreManager.toggleVpn(currentActive)

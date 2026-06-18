@@ -1,5 +1,8 @@
 package com.example.service
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
 import com.example.data.ServerEntity
 import com.example.data.V2RayRepository
 import kotlinx.coroutines.*
@@ -24,7 +27,7 @@ data class SpeedState(
     val rawUpBytes: Long = 0
 )
 
-class VpnCoreManager(private val repository: V2RayRepository) {
+class VpnCoreManager(private val context: Context, private val repository: V2RayRepository) {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     
     init {
@@ -73,6 +76,21 @@ class VpnCoreManager(private val repository: V2RayRepository) {
         scope.launch {
             repository.log("VPN", "INFO", "Initiating handshake sequence...")
             delay(300)
+            
+            // Start actual VpnService
+            try {
+                val intent = Intent(context, V2RayVpnService::class.java).apply {
+                    action = V2RayVpnService.ACTION_START
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                repository.log("VPN-SERVICE", "ERROR", "Failed to start standard VpnService: ${e.localizedMessage}")
+            }
+
             repository.log("V2RAY-CORE", "INFO", "V2Ray core v5.14.2 starting daemon process...")
             delay(250)
             repository.log("V2RAY-CORE", "INFO", "Loading configuration format v5. Outbound set to: [${server.type}] ${server.name}")
@@ -102,6 +120,17 @@ class VpnCoreManager(private val repository: V2RayRepository) {
 
         scope.launch {
             repository.log("VPN", "INFO", "Tearing down remote VPN tunnel session...")
+            
+            // Stop actual VpnService
+            try {
+                val intent = Intent(context, V2RayVpnService::class.java).apply {
+                    action = V2RayVpnService.ACTION_STOP
+                }
+                context.startService(intent)
+            } catch (e: Exception) {
+                repository.log("VPN-SERVICE", "ERROR", "Failed to stop standard VpnService: ${e.localizedMessage}")
+            }
+
             delay(200)
             repository.log("VPN-SERVICE", "INFO", "Releasing tun0 interface descriptor and resetting routes...")
             delay(150)
