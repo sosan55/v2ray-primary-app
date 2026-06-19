@@ -4,13 +4,35 @@ import com.example.data.ServerEntity
 
 object XrayConfigGenerator {
 
-    fun generate(server: ServerEntity): String {
+    fun generate(server: ServerEntity, fd: Int = -1): String {
         val outbounds = when (server.type.uppercase()) {
             "VLESS" -> generateVlessOutbound(server)
             "VMESS" -> generateVmessOutbound(server)
             "TROJAN" -> generateTrojanOutbound(server)
             "SHADOWSOCKS" -> generateShadowsocksOutbound(server)
             else -> generateFreedomOutbound()
+        }
+
+        val tunInboundOpt = if (fd != -1) {
+            """,
+            {
+              "protocol": "tun",
+              "port": 0,
+              "settings": {
+                "stack": "gvisor",
+                "name": "tun0",
+                "mtu": 1500,
+                "fileDescriptor": $fd,
+                "file_descriptor": $fd,
+                "fd": $fd,
+                "sniffing": {
+                  "enabled": true,
+                  "destOverride": ["http", "tls", "quic"]
+                }
+              }
+            }"""
+        } else {
+            ""
         }
 
         return """
@@ -34,6 +56,7 @@ object XrayConfigGenerator {
               "protocol": "http",
               "settings": {}
             }
+            $tunInboundOpt
           ],
           "outbounds": [
             $outbounds,

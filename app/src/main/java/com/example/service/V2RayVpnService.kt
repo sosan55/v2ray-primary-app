@@ -83,17 +83,7 @@ class V2RayVpnService : VpnService() {
 
             repository.log("VPN", "INFO", "Connecting to node: ${server.name} (${server.address}:${server.port})")
 
-            // Generate real configuration JSON string
-            val configJson = XrayConfigGenerator.generate(server)
-            val configFile = File(cacheDir, "xray_config.json")
-            try {
-                configFile.writeText(configJson)
-                repository.log("CONFIG", "SUCCESS", "Generated real client config format. Path: ${configFile.absolutePath}")
-            } catch (e: Exception) {
-                repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
-            }
-
-            // 1. Establish the TUN Interface with requested routes
+            // 1. Establish the TUN Interface with requested routes and exclude our own package to prevent routing loop
             try {
                 repository.log("TUNNEL", "INFO", "Allocating local tun0 interface file descriptor...")
                 
@@ -103,6 +93,13 @@ class V2RayVpnService : VpnService() {
                     .addRoute("0.0.0.0", 0)    // High priority global routing
                     .addDnsServer("8.8.8.8")   // Prevent Dns leaks
                     .setMtu(1500)
+
+                try {
+                    builder.addDisallowedApplication(packageName)
+                    repository.log("TUNNEL", "INFO", "Bypassed package to avoid routing loop: $packageName")
+                } catch (e: Exception) {
+                    repository.log("TUNNEL", "WARNING", "Could not add disallowed application exclusion: ${e.localizedMessage}")
+                }
 
                 interfaceDescriptor = builder.establish()
                 if (interfaceDescriptor != null) {
@@ -119,7 +116,19 @@ class V2RayVpnService : VpnService() {
                 return@launch
             }
 
-            // 2. Discover and execute core binary process
+            val fdNum = interfaceDescriptor?.fd ?: -1
+
+            // 2. Generate real configuration JSON string using the allocated file descriptor
+            val configJson = XrayConfigGenerator.generate(server, fdNum)
+            val configFile = File(cacheDir, "xray_config.json")
+            try {
+                configFile.writeText(configJson)
+                repository.log("CONFIG", "SUCCESS", "Generated real client config format with Tun/FD support. Path: ${configFile.absolutePath}")
+            } catch (e: Exception) {
+                repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
+            }
+
+            // 3. Discover and execute core binary process
             val binary = locateCoreBinary(applicationContext, repository)
             if (binary == null || !binary.exists()) {
                 repository.log("XRAY-CORE", "ERROR", "Xray/V2Ray compiled binary could not be found or copied. Please ensure a valid executable fits at assets.")
@@ -130,18 +139,12 @@ class V2RayVpnService : VpnService() {
             }
 
             try {
-                val fdNum = interfaceDescriptor?.fd ?: -1
                 repository.log("XRAY-CORE", "INFO", "Executing core binary daemon: ${binary.absolutePath}")
                 
                 val commandList = mutableListOf<String>()
                 commandList.add(binary.absolutePath)
                 commandList.add("-config")
                 commandList.add(configFile.absolutePath)
-                if (fdNum != -1) {
-                    // Pass the TUN file descriptor so xray/tun2socks subprocess can bind to it
-                    commandList.add("-tun-fd")
-                    commandList.add(fdNum.toString())
-                }
 
                 val processBuilder = ProcessBuilder()
                     .command(commandList)
