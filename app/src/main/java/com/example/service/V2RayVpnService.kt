@@ -181,64 +181,121 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    private fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
-        // Look in nativeLibrariesDir first (preinstalled compiled dynamic shared binary)
-        val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
-        val nativeBinary = File(nativeLibDir, "libxray.so")
-        if (nativeBinary.exists()) {
-            serviceScope.launch { repository.log("SYSTEM", "INFO", "Located executable library in nativeLibraryDir: ${nativeBinary.name}") }
-            return nativeBinary
-        }
+    private suspend fun downloadXrayBinary(context: Context, destination: File, repository: V2RayRepository): Boolean = withContext(Dispatchers.IO) {
+        val downloadUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
+        try {
+            repository.log("SYSTEM", "INFO", "Initiating runtime download of Xray core binary from: $downloadUrl")
+            
+            val tempFile = File(context.cacheDir, "temp_xray_download")
+            if (tempFile.exists()) tempFile.delete()
 
-        // We can extract/access the binary file inside internal storage filesDir
-        val filesBinary = File(context.filesDir, "xray")
-        
-        // Force extract if it doesn't exist or is a simple text placeholder
-        val needsExtract = if (filesBinary.exists()) {
-            // Check if it is a placeholder or has less content
-            filesBinary.length() < 1000
-        } else {
-            true
-        }
-
-        if (needsExtract) {
-            try {
-                serviceScope.launch { repository.log("SYSTEM", "INFO", "Extracting Xray core binary from assets to files directory: ${filesBinary.absolutePath}") }
-                context.assets.open("xray").use { input ->
-                    filesBinary.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                
-                // Set executable rights for both owner and group/others to avoid Permission Denied
-                filesBinary.setReadable(true, false)
-                val status1 = filesBinary.setExecutable(true, false)
-                val status2 = filesBinary.setExecutable(true, true)
-                
-                // Fallback shell chmod command for solid security guarantees in Android sandbox
-                try {
-                    val chmodProcess = Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath))
-                    chmodProcess.waitFor()
-                    serviceScope.launch { repository.log("SYSTEM", "SUCCESS", "Shell permissions chmod 755 completed successfully on: ${filesBinary.name}") }
-                } catch (e: Exception) {
-                    serviceScope.launch { repository.log("SYSTEM", "WARNING", "Shell chmod failed: ${e.localizedMessage}") }
-                }
-
-                serviceScope.launch {
-                    repository.log("SYSTEM", "SUCCESS", "Extracted and configured executable rights on binary: ownerStatus=$status1, globalStatus=$status2")
-                }
-            } catch (e: Exception) {
-                serviceScope.launch {
-                    repository.log("SYSTEM", "ERROR", "Failed to extract Xray core binary from assets: ${e.localizedMessage}")
+            java.net.URL(downloadUrl).openStream().use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
                 }
             }
-        } else {
-            // Enforce correct permissions on existing file anyway
-            filesBinary.setReadable(true, false)
-            filesBinary.setExecutable(true, false)
-            filesBinary.setExecutable(true, true)
+
+            repository.log("SYSTEM", "SUCCESS", "Download finished. Size: ${tempFile.length()} bytes.")
+
+            // Check if it is a ZIP archive
+            val isZip = try {
+                java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
+                    zipInput.nextEntry != null
+                }
+            } catch (e: Exception) {
+                false
+            }
+
+            if (isZip) {
+                repository.log("SYSTEM", "INFO", "Downloaded archive is a ZIP file. Extracting 'xray' dynamic binary...")
+                var extracted = false
+                java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
+                    var entry = zipInput.nextEntry
+                    while (entry != null) {
+                        if (entry.name == "xray" || entry.name.endsWith("/xray")) {
+                            destination.outputStream().use { output ->
+                                zipInput.copyTo(output)
+                            }
+                            extracted = true
+                            break
+                        }
+                        entry = zipInput.nextEntry
+                    }
+                }
+                tempFile.delete()
+                if (!extracted) {
+                    repository.log("SYSTEM", "ERROR", "Could not locate 'xray' executable within the downloaded ZIP package.")
+                    return@withContext false
+                }
+            } else {
+                // If it's a raw executable binary, shift it directly to destination
+                repository.log("SYSTEM", "INFO", "Downloaded file is a raw binary. Saving directly...")
+                tempFile.renameTo(destination)
+            }
+
+            // Set executable privileges
+            destination.setReadable(true, false)
+            val execOwner = destination.setExecutable(true, false)
+            val execAll = destination.setExecutable(true, true)
+            
             try {
-                Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath)).waitFor()
+                val chmod = Runtime.getRuntime().exec(arrayOf("chmod", "755", destination.absolutePath))
+                chmod.waitFor()
+                repository.log("SYSTEM", "SUCCESS", "Run-time chmod 755 execution succeeded on downloaded core binary.")
+            } catch (e: Exception) {
+                repository.log("SYSTEM", "WARNING", "System security shell chmod output: ${e.localizedMessage}")
+            }
+
+            repository.log("SYSTEM", "SUCCESS", "Runtime core binary download and extraction complete.")
+            return@withContext true
+        } catch (e: Exception) {
+            repository.log("SYSTEM", "ERROR", "Failed download sequence of core binary: ${e.localizedMessage}")
+            return@withContext false
+        }
+    }
+
+    private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
+        val filesBinary = File(context.filesDir, "xray")
+        
+        // Check if the file is absent or just a tiny placeholder (< 1000 bytes)
+        val needsDownload = !filesBinary.exists() || filesBinary.length() < 1000
+
+        if (needsDownload) {
+            repository.log("SYSTEM", "INFO", "Xray core binary on filesDir is missing or a placeholder. Starting download...")
+            val downloadSuccess = downloadXrayBinary(context, filesBinary, repository)
+            if (!downloadSuccess) {
+                repository.log("SYSTEM", "WARNING", "Direct download failed. Falling back to native shared library or assets...")
+                
+                // Fallback 1: Native binary preinstalled in nativeLibraryDir
+                val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
+                val nativeBinary = File(nativeLibDir, "libxray.so")
+                if (nativeBinary.exists()) {
+                    repository.log("SYSTEM", "INFO", "Located executable library in nativeLibraryDir: ${nativeBinary.name}")
+                    return nativeBinary
+                }
+                
+                // Fallback 2: Extract from assets placeholder (as a last resort failure backup)
+                try {
+                    repository.log("SYSTEM", "INFO", "Extracting fallback placeholder from assets to files directory: ${filesBinary.absolutePath}")
+                    context.assets.open("xray").use { input ->
+                        filesBinary.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                } catch (e: Exception) {
+                    repository.log("SYSTEM", "ERROR", "Failed to write placeholder: ${e.localizedMessage}")
+                }
+            }
+        }
+
+        // Ensure execution permissions on filesBinary (if it exists)
+        if (filesBinary.exists()) {
+            filesBinary.setReadable(true, false)
+            val p1 = filesBinary.setExecutable(true, false)
+            val p2 = filesBinary.setExecutable(true, true)
+            try {
+                val chmodProcess = Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath))
+                chmodProcess.waitFor()
             } catch (e: Exception) {}
         }
 
