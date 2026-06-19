@@ -258,6 +258,17 @@ class V2RayVpnService : VpnService() {
     }
 
     private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
+        // 1. Primary check on Android 10+: ALWAYS check the nativeLibraryDir first!
+        // This is the read-only directory managed by Package Manager where files can be executed.
+        val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
+        val nativeBinary = File(nativeLibDir, "libxray.so")
+        if (nativeBinary.exists() && nativeBinary.length() > 1000) {
+            repository.log("SYSTEM", "SUCCESS", "Located standard executable library in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes)")
+            return nativeBinary
+        }
+
+        repository.log("SYSTEM", "WARNING", "libxray.so not found or too small in nativeLibraryDir. Attempting backup download or placeholder load...")
+
         val filesBinary = File(context.filesDir, "xray")
         
         // Check if the file is absent or just a tiny placeholder (< 1000 bytes)
@@ -269,11 +280,9 @@ class V2RayVpnService : VpnService() {
             if (!downloadSuccess) {
                 repository.log("SYSTEM", "WARNING", "Direct download failed. Falling back to native shared library or assets...")
                 
-                // Fallback 1: Native binary preinstalled in nativeLibraryDir
-                val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
-                val nativeBinary = File(nativeLibDir, "libxray.so")
+                // Fallback 1: Native binary preinstalled in nativeLibraryDir (checked again just in case)
                 if (nativeBinary.exists()) {
-                    repository.log("SYSTEM", "INFO", "Located executable library in nativeLibraryDir: ${nativeBinary.name}")
+                    repository.log("SYSTEM", "INFO", "Fallback located executable library in nativeLibraryDir: ${nativeBinary.name}")
                     return nativeBinary
                 }
                 
