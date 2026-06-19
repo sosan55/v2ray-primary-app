@@ -185,7 +185,7 @@ class V2RayVpnService : VpnService() {
         // Look in nativeLibrariesDir first (preinstalled compiled dynamic shared binary)
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
         val nativeBinary = File(nativeLibDir, "libxray.so")
-        if (nativeBinary.exists() && nativeBinary.canExecute()) {
+        if (nativeBinary.exists()) {
             serviceScope.launch { repository.log("SYSTEM", "INFO", "Located executable library in nativeLibraryDir: ${nativeBinary.name}") }
             return nativeBinary
         }

@@ -1,4 +1,5 @@
 import java.util.Base64
+import java.net.URL
 
 plugins {
   alias(libs.plugins.android.application)
@@ -155,3 +156,53 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+tasks.register("downloadXrayCore") {
+    group = "build setup"
+    description = "Downloads Xray core arm64 binary and places it in jniLibs"
+
+    val xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
+    val outputDir = file("src/main/jniLibs/arm64-v8a")
+    val jniLibFile = file("src/main/jniLibs/arm64-v8a/libxray.so")
+
+    inputs.property("xrayUrl", xrayUrl)
+    outputs.file(jniLibFile)
+
+    doLast {
+        if (!jniLibFile.exists()) {
+            outputDir.mkdirs()
+            val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
+            tempZip.parentFile.mkdirs()
+            
+            println("Downloading Xray binary from $xrayUrl ...")
+            try {
+                URL(xrayUrl).openStream().use { input ->
+                    tempZip.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                println("Download complete. Unzipping Xray binary...")
+                zipTree(tempZip).forEach { extractedFile ->
+                    if (extractedFile.name == "xray") {
+                        extractedFile.copyTo(jniLibFile, overwrite = true)
+                        println("Successfully extracted xray binary to $jniLibFile")
+                    }
+                }
+            } catch (e: java.lang.Exception) {
+                println("Error downloading/extracting Xray: ${e.message}")
+                throw e
+            } finally {
+                if (tempZip.exists()) {
+                    tempZip.delete()
+                }
+            }
+        } else {
+            println("libxray.so already exists, skipping download.")
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn("downloadXrayCore")
+}
+
