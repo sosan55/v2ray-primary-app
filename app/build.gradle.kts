@@ -69,7 +69,7 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      
+
       val base64Keystore = System.getenv("KEYSTORE_BASE64")
       val keystorePathEnv = System.getenv("KEYSTORE_PATH")
       val keystorePath = if (!keystorePathEnv.isNullOrBlank()) keystorePathEnv else "${rootDir}/my-upload-key.jks"
@@ -182,10 +182,10 @@ tasks.register("downloadXrayCore") {
                 }
             }
             println("[Xray] Download complete. Extracting...")
-            zipTree(tempZip).forEach { extractedFile ->
-                if (extractedFile.name == "xray") {
-                    extractedFile.copyTo(jniLibFile, overwrite = true)
-                    println("[Xray] ✓ Extracted to $jniLibFile")
+            project.zipTree(tempZip).visit {
+                if (!isDirectory && name == "xray") {
+                    file.copyTo(jniLibFile, overwrite = true)
+                    println("[Xray] ✓ Extracted to ${jniLibFile.absolutePath}")
                 }
             }
         } catch (e: Exception) {
@@ -208,15 +208,15 @@ tasks.register("downloadTun2socks") {
     val tun2socksUrl =
         "https://github.com/xjasonlyu/tun2socks/releases/download/" +
         "$tun2socksVersion/tun2socks-linux-android-arm64.zip"
-    val assetsDir  = file("src/main/assets")
-    val destFile   = file("src/main/assets/tun2socks")
+    val assetsDir = file("src/main/assets")
+    val destFile  = file("src/main/assets/tun2socks")
 
     inputs.property("tun2socksUrl", tun2socksUrl)
     outputs.file(destFile)
 
     doLast {
         if (destFile.exists() && destFile.length() > 1000) {
-            println("[tun2socks] Binary already exists (${destFile.length()} bytes). Skipping.")
+            println("[tun2socks] Already exists (${destFile.length()} bytes). Skipping.")
             return@doLast
         }
 
@@ -225,41 +225,31 @@ tasks.register("downloadTun2socks") {
         tempZip.parentFile.mkdirs()
 
         println("[tun2socks] Downloading from $tun2socksUrl ...")
+
         try {
-            URL(tun2socksUrl).openStream().use { input ->
-                tempZip.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+            java.net.URL(tun2socksUrl).openStream().use { ins ->
+                tempZip.outputStream().use { out -> ins.copyTo(out) }
             }
-            println("[tun2socks] Download complete (${tempZip.length()} bytes). Extracting...")
+            println("[tun2socks] Downloaded (${tempZip.length()} bytes). Extracting...")
 
             var found = false
-            java.util.zip.ZipInputStream(tempZip.inputStream()).use { zis ->
-                var entry = zis.nextEntry
-                while (entry != null) {
-                    println("[tun2socks] ZIP entry: ${entry.name}")
-                    if (entry.name == "tun2socks" || entry.name.endsWith("/tun2socks")) {
-                        destFile.outputStream().use { out -> zis.copyTo(out) }
-                        found = true
-                        println("[tun2socks] ✓ Extracted to ${destFile.absolutePath}")
-                        break
-                    }
-                    zis.closeEntry()
-                    entry = zis.nextEntry
+            project.zipTree(tempZip).visit {
+                if (!isDirectory && name == "tun2socks") {
+                    file.copyTo(destFile, overwrite = true)
+                    found = true
+                    println("[tun2socks] ✓ Extracted: ${destFile.absolutePath}")
                 }
             }
 
             if (!found) {
                 throw GradleException(
-                    "[tun2socks] ERROR: 'tun2socks' binary not found inside ZIP!\n" +
-                    "Check release URL: $tun2socksUrl"
+                    "[tun2socks] Binary not found in ZIP! URL: $tun2socksUrl"
                 )
             }
 
-            println("[tun2socks] ✓ Ready: ${destFile.absolutePath} (${destFile.length()} bytes)")
+            println("[tun2socks] ✓ Ready (${destFile.length()} bytes)")
 
         } catch (e: Exception) {
-            println("[tun2socks] ERROR: ${e.message}")
             if (destFile.exists()) destFile.delete()
             throw e
         } finally {
