@@ -18,7 +18,6 @@ android {
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
-
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
@@ -68,7 +67,6 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-
       val base64Keystore = System.getenv("KEYSTORE_BASE64")
       val keystorePathEnv = System.getenv("KEYSTORE_PATH")
       val keystorePath = if (!keystorePathEnv.isNullOrBlank()) keystorePathEnv else "${rootDir}/my-upload-key.jks"
@@ -150,14 +148,29 @@ dependencies {
 }
 
 // ─────────────────────────────────────────────────────────────
+// تابع کمکی: دانلود با curl (بدون java.net)
+// ─────────────────────────────────────────────────────────────
+fun downloadWithCurl(url: String, destFile: File, tag: String) {
+    destFile.parentFile.mkdirs()
+    println("[$tag] Downloading: $url")
+    val result = exec {
+        commandLine("curl", "-L", "-o", destFile.absolutePath, url)
+    }
+    if (result.exitValue != 0) {
+        throw GradleException("[$tag] curl failed with exit code ${result.exitValue}")
+    }
+    println("[$tag] Downloaded (${destFile.length()} bytes)")
+}
+
+// ─────────────────────────────────────────────────────────────
 // Task 1: دانلود Xray core binary
 // ─────────────────────────────────────────────────────────────
 tasks.register("downloadXrayCore") {
     group = "build setup"
     description = "Downloads Xray core arm64 binary and places it in jniLibs"
 
-    val xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
-    val outputDir = file("src/main/jniLibs/arm64-v8a")
+    val xrayUrl    = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
+    val outputDir  = file("src/main/jniLibs/arm64-v8a")
     val jniLibFile = file("src/main/jniLibs/arm64-v8a/libxray.so")
 
     inputs.property("xrayUrl", xrayUrl)
@@ -173,24 +186,20 @@ tasks.register("downloadXrayCore") {
         val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
         tempZip.parentFile.mkdirs()
 
-        println("[Xray] Downloading from $xrayUrl ...")
         try {
-            val connection = java.net.URI(xrayUrl).toURL().openConnection()
-            connection.connect()
-            connection.getInputStream().use { ins ->
-                tempZip.outputStream().use { out -> ins.copyTo(out) }
-            }
-            println("[Xray] Downloaded (${tempZip.length()} bytes). Extracting...")
+            downloadWithCurl(xrayUrl, tempZip, "Xray")
 
+            println("[Xray] Extracting...")
             project.zipTree(tempZip).visit {
                 if (!isDirectory && name == "xray") {
                     file.copyTo(jniLibFile, overwrite = true)
                     println("[Xray] ✓ Extracted to ${jniLibFile.absolutePath}")
                 }
             }
-        } catch (e: Exception) {
-            println("[Xray] ERROR: ${e.message}")
-            throw e
+
+            if (!jniLibFile.exists()) {
+                throw GradleException("[Xray] 'xray' binary not found inside ZIP!")
+            }
         } finally {
             if (tempZip.exists()) tempZip.delete()
         }
@@ -205,7 +214,7 @@ tasks.register("downloadTun2socks") {
     description = "Downloads tun2socks arm64 binary and places it in assets/"
 
     val tun2socksVersion = "v2.5.2"
-    val tun2socksUrl =
+    val tun2socksUrl     =
         "https://github.com/xjasonlyu/tun2socks/releases/download/" +
         "$tun2socksVersion/tun2socks-linux-android-arm64.zip"
     val assetsDir = file("src/main/assets")
@@ -224,15 +233,10 @@ tasks.register("downloadTun2socks") {
         val tempZip = file("build/tmp/tun2socks.zip")
         tempZip.parentFile.mkdirs()
 
-        println("[tun2socks] Downloading from $tun2socksUrl ...")
         try {
-            val connection = java.net.URI(tun2socksUrl).toURL().openConnection()
-            connection.connect()
-            connection.getInputStream().use { ins ->
-                tempZip.outputStream().use { out -> ins.copyTo(out) }
-            }
-            println("[tun2socks] Downloaded (${tempZip.length()} bytes). Extracting...")
+            downloadWithCurl(tun2socksUrl, tempZip, "tun2socks")
 
+            println("[tun2socks] Extracting...")
             var found = false
             project.zipTree(tempZip).visit {
                 if (!isDirectory && name == "tun2socks") {
@@ -247,9 +251,6 @@ tasks.register("downloadTun2socks") {
             }
             println("[tun2socks] ✓ Ready (${destFile.length()} bytes)")
 
-        } catch (e: Exception) {
-            if (destFile.exists()) destFile.delete()
-            throw e
         } finally {
             if (tempZip.exists()) tempZip.delete()
         }
