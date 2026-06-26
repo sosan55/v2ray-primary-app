@@ -33,10 +33,12 @@ jobs:
               fi
             fi
           fi
-          
+
           if [ "$decoded" = "false" ]; then
             echo "Generating a brand new debug.keystore..."
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkey -v -keystore debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Download Xray Core Binary
@@ -84,8 +86,7 @@ jobs:
           echo "[tun2socks] Downloaded. Extracting..."
 
           unzip -o /tmp/tun2socks/tun2socks.zip -d /tmp/tun2socks/
-          
-          # پیدا کردن باینری در ZIP (ممکنه در subdirectory باشه)
+
           BINARY=$(find /tmp/tun2socks -name "tun2socks" -type f | head -1)
           if [ -z "$BINARY" ]; then
             echo "[tun2socks] ERROR: Binary not found in ZIP!"
