@@ -84,6 +84,7 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
+
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -100,24 +101,15 @@ android {
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
 }
 
-// Some unused dependencies are commented out below instead of being removed.
-// This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
-  // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
-  // implementation(libs.androidx.camera.camera2)
-  // implementation(libs.androidx.camera.core)
-  // implementation(libs.androidx.camera.lifecycle)
-  // implementation(libs.androidx.camera.view)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
@@ -125,22 +117,18 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
-  // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
-  // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
-  // implementation(libs.firebase.ai)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
-  // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
@@ -162,6 +150,9 @@ dependencies {
   "ksp"(libs.moshi.kotlin.codegen)
 }
 
+// ─────────────────────────────────────────────────────────────
+// Task 1: دانلود Xray core binary
+// ─────────────────────────────────────────────────────────────
 tasks.register("downloadXrayCore") {
     group = "build setup"
     description = "Downloads Xray core arm64 binary and places it in jniLibs"
@@ -174,40 +165,113 @@ tasks.register("downloadXrayCore") {
     outputs.file(jniLibFile)
 
     doLast {
-        if (!jniLibFile.exists()) {
-            outputDir.mkdirs()
-            val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
-            tempZip.parentFile.mkdirs()
-            
-            println("Downloading Xray binary from $xrayUrl ...")
-            try {
-                URL(xrayUrl).openStream().use { input ->
-                    tempZip.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                println("Download complete. Unzipping Xray binary...")
-                zipTree(tempZip).forEach { extractedFile ->
-                    if (extractedFile.name == "xray") {
-                        extractedFile.copyTo(jniLibFile, overwrite = true)
-                        println("Successfully extracted xray binary to $jniLibFile")
-                    }
-                }
-            } catch (e: java.lang.Exception) {
-                println("Error downloading/extracting Xray: ${e.message}")
-                throw e
-            } finally {
-                if (tempZip.exists()) {
-                    tempZip.delete()
+        if (jniLibFile.exists() && jniLibFile.length() > 1000) {
+            println("[Xray] libxray.so already exists (${jniLibFile.length()} bytes). Skipping.")
+            return@doLast
+        }
+
+        outputDir.mkdirs()
+        val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
+        tempZip.parentFile.mkdirs()
+
+        println("[Xray] Downloading from $xrayUrl ...")
+        try {
+            URL(xrayUrl).openStream().use { input ->
+                tempZip.outputStream().use { output ->
+                    input.copyTo(output)
                 }
             }
-        } else {
-            println("libxray.so already exists, skipping download.")
+            println("[Xray] Download complete. Extracting...")
+            zipTree(tempZip).forEach { extractedFile ->
+                if (extractedFile.name == "xray") {
+                    extractedFile.copyTo(jniLibFile, overwrite = true)
+                    println("[Xray] ✓ Extracted to $jniLibFile")
+                }
+            }
+        } catch (e: Exception) {
+            println("[Xray] ERROR: ${e.message}")
+            throw e
+        } finally {
+            if (tempZip.exists()) tempZip.delete()
         }
     }
 }
 
-tasks.named("preBuild") {
-    dependsOn("downloadXrayCore")
+// ─────────────────────────────────────────────────────────────
+// Task 2: دانلود tun2socks binary
+// ─────────────────────────────────────────────────────────────
+tasks.register("downloadTun2socks") {
+    group = "build setup"
+    description = "Downloads tun2socks arm64 binary and places it in assets/"
+
+    val tun2socksVersion = "v2.5.2"
+    val tun2socksUrl =
+        "https://github.com/xjasonlyu/tun2socks/releases/download/" +
+        "$tun2socksVersion/tun2socks-linux-android-arm64.zip"
+    val assetsDir  = file("src/main/assets")
+    val destFile   = file("src/main/assets/tun2socks")
+
+    inputs.property("tun2socksUrl", tun2socksUrl)
+    outputs.file(destFile)
+
+    doLast {
+        if (destFile.exists() && destFile.length() > 1000) {
+            println("[tun2socks] Binary already exists (${destFile.length()} bytes). Skipping.")
+            return@doLast
+        }
+
+        assetsDir.mkdirs()
+        val tempZip = file("build/tmp/tun2socks.zip")
+        tempZip.parentFile.mkdirs()
+
+        println("[tun2socks] Downloading from $tun2socksUrl ...")
+        try {
+            URL(tun2socksUrl).openStream().use { input ->
+                tempZip.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            println("[tun2socks] Download complete (${tempZip.length()} bytes). Extracting...")
+
+            var found = false
+            java.util.zip.ZipInputStream(tempZip.inputStream()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    println("[tun2socks] ZIP entry: ${entry.name}")
+                    if (entry.name == "tun2socks" || entry.name.endsWith("/tun2socks")) {
+                        destFile.outputStream().use { out -> zis.copyTo(out) }
+                        found = true
+                        println("[tun2socks] ✓ Extracted to ${destFile.absolutePath}")
+                        break
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+
+            if (!found) {
+                throw GradleException(
+                    "[tun2socks] ERROR: 'tun2socks' binary not found inside ZIP!\n" +
+                    "Check release URL: $tun2socksUrl"
+                )
+            }
+
+            println("[tun2socks] ✓ Ready: ${destFile.absolutePath} (${destFile.length()} bytes)")
+
+        } catch (e: Exception) {
+            println("[tun2socks] ERROR: ${e.message}")
+            if (destFile.exists()) destFile.delete()
+            throw e
+        } finally {
+            if (tempZip.exists()) tempZip.delete()
+        }
+    }
 }
 
+// ─────────────────────────────────────────────────────────────
+// هر دو task قبل از preBuild اجرا میشن
+// ─────────────────────────────────────────────────────────────
+tasks.named("preBuild") {
+    dependsOn("downloadXrayCore")
+    dependsOn("downloadTun2socks")
+}
