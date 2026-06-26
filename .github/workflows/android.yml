@@ -69,7 +69,7 @@ jobs:
       - name: Download tun2socks Binary
         run: |
           TUN2SOCKS_VERSION="v2.5.2"
-          TUN2SOCKS_URL="https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-android-arm64.zip"
+          TUN2SOCKS_URL="https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-arm64.zip"
           ASSETS_DIR="app/src/main/assets"
           OUTPUT_FILE="${ASSETS_DIR}/tun2socks"
 
@@ -83,14 +83,17 @@ jobs:
 
           echo "[tun2socks] Downloading from $TUN2SOCKS_URL ..."
           curl -L -o /tmp/tun2socks/tun2socks.zip "$TUN2SOCKS_URL"
+
+          # بررسی که فایل دانلود شده واقعاً ZIP هست
+          file /tmp/tun2socks/tun2socks.zip
+
           echo "[tun2socks] Downloaded. Extracting..."
-
           unzip -o /tmp/tun2socks/tun2socks.zip -d /tmp/tun2socks/
+          ls -la /tmp/tun2socks/
 
-          BINARY=$(find /tmp/tun2socks -name "tun2socks" -type f | head -1)
+          BINARY=$(find /tmp/tun2socks -maxdepth 2 -name "tun2socks" -type f | head -1)
           if [ -z "$BINARY" ]; then
-            echo "[tun2socks] ERROR: Binary not found in ZIP!"
-            ls -la /tmp/tun2socks/
+            echo "[tun2socks] ERROR: Binary not found!"
             exit 1
           fi
 
