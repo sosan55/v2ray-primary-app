@@ -33,74 +33,11 @@ jobs:
               fi
             fi
           fi
-
+          
           if [ "$decoded" = "false" ]; then
             echo "Generating a brand new debug.keystore..."
-            keytool -genkey -v -keystore debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
-
-      - name: Download Xray Core Binary
-        run: |
-          XRAY_VERSION="v1.8.24"
-          XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-arm64-v8a.zip"
-          OUTPUT_DIR="app/src/main/jniLibs/arm64-v8a"
-          OUTPUT_FILE="${OUTPUT_DIR}/libxray.so"
-
-          if [ -f "$OUTPUT_FILE" ] && [ $(stat -c%s "$OUTPUT_FILE") -gt 1000 ]; then
-            echo "[Xray] Already exists. Skipping."
-            exit 0
-          fi
-
-          mkdir -p "$OUTPUT_DIR"
-          mkdir -p "/tmp/xray"
-
-          echo "[Xray] Downloading from $XRAY_URL ..."
-          curl -L -o /tmp/xray/xray.zip "$XRAY_URL"
-          echo "[Xray] Downloaded. Extracting..."
-
-          unzip -o /tmp/xray/xray.zip xray -d /tmp/xray/
-          cp /tmp/xray/xray "$OUTPUT_FILE"
-
-          echo "[Xray] ✓ Done: $OUTPUT_FILE ($(stat -c%s $OUTPUT_FILE) bytes)"
-          rm -rf /tmp/xray
-
-      - name: Download tun2socks Binary
-        run: |
-          TUN2SOCKS_VERSION="v2.5.2"
-          TUN2SOCKS_URL="https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/tun2socks-linux-arm64.zip"
-          ASSETS_DIR="app/src/main/assets"
-          OUTPUT_FILE="${ASSETS_DIR}/tun2socks"
-
-          if [ -f "$OUTPUT_FILE" ] && [ $(stat -c%s "$OUTPUT_FILE") -gt 1000 ]; then
-            echo "[tun2socks] Already exists. Skipping."
-            exit 0
-          fi
-
-          mkdir -p "$ASSETS_DIR"
-          mkdir -p "/tmp/tun2socks"
-
-          echo "[tun2socks] Downloading from $TUN2SOCKS_URL ..."
-          curl -L -o /tmp/tun2socks/tun2socks.zip "$TUN2SOCKS_URL"
-
-          echo "[tun2socks] Downloaded. Extracting..."
-          unzip -o /tmp/tun2socks/tun2socks.zip -d /tmp/tun2socks/
-          ls -la /tmp/tun2socks/
-
-          # پیدا کردن باینری - هر فایل غیر ZIP
-          BINARY=$(find /tmp/tun2socks -maxdepth 2 -type f ! -name "*.zip" | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "[tun2socks] ERROR: Binary not found!"
-            exit 1
-          fi
-
-          echo "[tun2socks] Found binary: $BINARY"
-          cp "$BINARY" "$OUTPUT_FILE"
-          chmod +x "$OUTPUT_FILE"
-
-          echo "[tun2socks] ✓ Done: $OUTPUT_FILE ($(stat -c%s $OUTPUT_FILE) bytes)"
-          rm -rf /tmp/tun2socks
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

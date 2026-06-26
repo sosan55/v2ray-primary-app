@@ -45,7 +45,6 @@ fun HomeScreen(
     val activeServer by viewModel.activeServer.collectAsState()
     val durationSec by viewModel.connectionDuration.collectAsState()
     val routingMode by viewModel.routingMode.collectAsState()
-    val isAutoConnectActive by viewModel.isAutoConnectActive.collectAsState()
 
     Column(
         modifier = modifier
@@ -97,8 +96,7 @@ fun HomeScreen(
         SelectedNodeCard(
             activeServer = activeServer,
             onClick = onNavigateToServers,
-            routingMode = routingMode,
-            isAutoConnectActive = isAutoConnectActive
+            routingMode = routingMode
         )
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -406,8 +404,7 @@ fun SpeedMeterGrid(speedState: SpeedState) {
 fun SelectedNodeCard(
     activeServer: ServerEntity?,
     onClick: () -> Unit,
-    routingMode: String,
-    isAutoConnectActive: Boolean
+    routingMode: String
 ) {
     Card(
         modifier = Modifier
@@ -456,20 +453,6 @@ fun SelectedNodeCard(
                         color = SlateTextSecondary,
                         letterSpacing = 1.sp
                     )
-                    if (isAutoConnectActive) {
-                        Box(
-                            modifier = Modifier
-                                .size(5.dp)
-                                .background(ElegantGreen, CircleShape)
-                        )
-                        Text(
-                            text = "AUTO-SELECTOR",
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ElegantGreen,
-                            letterSpacing = 0.5.sp
-                        )
-                    }
                 }
                 Text(
                     text = activeServer?.name ?: "No Node Selected",

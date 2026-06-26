@@ -13,13 +13,32 @@ object XrayConfigGenerator {
             else -> generateFreedomOutbound()
         }
 
-        // TUN inbound حذف شد - Xray پروتکل tun ندارد
-        // ترافیک از طریق SOCKS inbound روی پورت 10808 روت میشه
+        val tunInboundOpt = if (fd != -1) {
+            """,
+            {
+              "protocol": "tun",
+              "port": 0,
+              "settings": {
+                "stack": "gvisor",
+                "name": "tun0",
+                "mtu": 1500,
+                "fileDescriptor": $fd,
+                "file_descriptor": $fd,
+                "fd": $fd,
+                "sniffing": {
+                  "enabled": true,
+                  "destOverride": ["http", "tls", "quic"]
+                }
+              }
+            }"""
+        } else {
+            ""
+        }
 
         return """
         {
           "log": {
-            "loglevel": "warning"
+            "loglevel": "info"
           },
           "inbounds": [
             {
@@ -29,10 +48,6 @@ object XrayConfigGenerator {
               "settings": {
                 "auth": "noauth",
                 "udp": true
-              },
-              "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls"]
               }
             },
             {
@@ -41,6 +56,7 @@ object XrayConfigGenerator {
               "protocol": "http",
               "settings": {}
             }
+            $tunInboundOpt
           ],
           "outbounds": [
             $outbounds,
@@ -48,23 +64,8 @@ object XrayConfigGenerator {
               "protocol": "freedom",
               "settings": {},
               "tag": "direct"
-            },
-            {
-              "protocol": "blackhole",
-              "settings": {},
-              "tag": "block"
             }
-          ],
-          "routing": {
-            "domainStrategy": "IPIfNonMatch",
-            "rules": [
-              {
-                "type": "field",
-                "ip": ["geoip:private"],
-                "outboundTag": "direct"
-              }
-            ]
-          }
+          ]
         }
         """.trimIndent()
     }
@@ -92,7 +93,7 @@ object XrayConfigGenerator {
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateVmessOutbound(server: ServerEntity): String {
@@ -119,7 +120,7 @@ object XrayConfigGenerator {
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateTrojanOutbound(server: ServerEntity): String {
@@ -140,10 +141,11 @@ object XrayConfigGenerator {
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateShadowsocksOutbound(server: ServerEntity): String {
+        // ss stores method:password inside UUID field
         val creds = server.uuid.split(":")
         val method = if (creds.size > 0) creds[0] else "aes-256-gcm"
         val password = if (creds.size > 1) creds[1] else "mypassword"
@@ -166,7 +168,7 @@ object XrayConfigGenerator {
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateFreedomOutbound(): String {
@@ -176,50 +178,49 @@ object XrayConfigGenerator {
           "settings": {},
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateStreamSettings(server: ServerEntity): String {
         val securityStr = if (server.tls) "tls" else "none"
-        
-        // ساخت بخش‌های اختیاری به صورت لیست برای جلوگیری از کاما اضافه
-        val parts = mutableListOf<String>()
-
-        if (server.tls) {
+        val securityConfig = if (server.tls) {
             val sniToUse = server.sni.ifEmpty { server.address }
-            parts.add("""
-              "tlsSettings": {
-                "serverName": "$sniToUse",
-                "allowInsecure": false
-              }
-            """.trimIndent())
-        }
-
-        when (server.network.lowercase()) {
-            "ws" -> parts.add("""
-              "wsSettings": {
-                "path": "${server.path.ifEmpty { "/" }}",
-                "headers": {
-                  "Host": "${server.host.ifEmpty { server.address }}"
-                }
-              }
-            """.trimIndent())
-            "grpc" -> parts.add("""
-              "grpcSettings": {
-                "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}"
-              }
-            """.trimIndent())
-        }
-
-        val extraFields = if (parts.isNotEmpty()) {
-            ",\n" + parts.joinToString(",\n")
+            """
+            "tlsSettings": {
+              "serverName": "$sniToUse",
+              "allowInsecure": true
+            }
+            """
         } else ""
+
+        val transportConfig = when (server.network.lowercase()) {
+            "ws" -> """
+            "wsSettings": {
+              "path": "${server.path.ifEmpty { "/" }}",
+              "headers": {
+                "Host": "${server.host.ifEmpty { server.address }}"
+              }
+            }
+            """
+            "grpc" -> """
+            "grpcSettings": {
+              "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}"
+            }
+            """
+            else -> ""
+        }
+
+        val separator = if (securityConfig.isNotEmpty() && transportConfig.isNotEmpty()) "," else ""
 
         return """
         {
           "network": "${server.network.lowercase().ifEmpty { "tcp" }}",
-          "security": "$securityStr"$extraFields
+          "security": "$securityStr"
+          ${if (securityConfig.isNotEmpty() || transportConfig.isNotEmpty()) "," else ""}
+          $securityConfig
+          $separator
+          $transportConfig
         }
-        """.trimIndent()
+        """
     }
 }

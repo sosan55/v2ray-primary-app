@@ -50,17 +50,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isTestingPing = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
     val isTestingPing: StateFlow<Map<Long, Boolean>> = _isTestingPing.asStateFlow()
 
-    // Background optimizer service active status and launcher toggle
-    val isAutoConnectActive: StateFlow<Boolean> = com.example.service.AutoConnectService.isServiceActive
+    // Background optimizer service active status and launcher toggle (Disabled from root)
+    val isAutoConnectActive: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
 
     fun toggleAutoConnect() {
-        val context = getApplication<Application>()
-        val intent = android.content.Intent(context, com.example.service.AutoConnectService::class.java)
-        if (isAutoConnectActive.value) {
-            context.stopService(intent)
-        } else {
-            context.startService(intent)
-        }
+        // Disabled from root as requested
     }
 
     // Preferences configuration (Saved locally inside DB or simple local memory)
