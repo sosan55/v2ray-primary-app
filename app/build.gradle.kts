@@ -1,5 +1,4 @@
 import java.util.Base64
-import java.net.URL
 
 plugins {
   alias(libs.plugins.android.application)
@@ -166,7 +165,7 @@ tasks.register("downloadXrayCore") {
 
     doLast {
         if (jniLibFile.exists() && jniLibFile.length() > 1000) {
-            println("[Xray] libxray.so already exists (${jniLibFile.length()} bytes). Skipping.")
+            println("[Xray] Already exists (${jniLibFile.length()} bytes). Skipping.")
             return@doLast
         }
 
@@ -176,12 +175,13 @@ tasks.register("downloadXrayCore") {
 
         println("[Xray] Downloading from $xrayUrl ...")
         try {
-            URL(xrayUrl).openStream().use { input ->
-                tempZip.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+            val connection = java.net.URI(xrayUrl).toURL().openConnection()
+            connection.connect()
+            connection.getInputStream().use { ins ->
+                tempZip.outputStream().use { out -> ins.copyTo(out) }
             }
-            println("[Xray] Download complete. Extracting...")
+            println("[Xray] Downloaded (${tempZip.length()} bytes). Extracting...")
+
             project.zipTree(tempZip).visit {
                 if (!isDirectory && name == "xray") {
                     file.copyTo(jniLibFile, overwrite = true)
@@ -225,9 +225,10 @@ tasks.register("downloadTun2socks") {
         tempZip.parentFile.mkdirs()
 
         println("[tun2socks] Downloading from $tun2socksUrl ...")
-
         try {
-            java.net.URL(tun2socksUrl).openStream().use { ins ->
+            val connection = java.net.URI(tun2socksUrl).toURL().openConnection()
+            connection.connect()
+            connection.getInputStream().use { ins ->
                 tempZip.outputStream().use { out -> ins.copyTo(out) }
             }
             println("[tun2socks] Downloaded (${tempZip.length()} bytes). Extracting...")
@@ -242,11 +243,8 @@ tasks.register("downloadTun2socks") {
             }
 
             if (!found) {
-                throw GradleException(
-                    "[tun2socks] Binary not found in ZIP! URL: $tun2socksUrl"
-                )
+                throw GradleException("[tun2socks] Binary not found in ZIP! URL: $tun2socksUrl")
             }
-
             println("[tun2socks] ✓ Ready (${destFile.length()} bytes)")
 
         } catch (e: Exception) {
