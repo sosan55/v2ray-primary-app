@@ -84,19 +84,18 @@ jobs:
           echo "[tun2socks] Downloading from $TUN2SOCKS_URL ..."
           curl -L -o /tmp/tun2socks/tun2socks.zip "$TUN2SOCKS_URL"
 
-          # بررسی که فایل دانلود شده واقعاً ZIP هست
-          file /tmp/tun2socks/tun2socks.zip
-
           echo "[tun2socks] Downloaded. Extracting..."
           unzip -o /tmp/tun2socks/tun2socks.zip -d /tmp/tun2socks/
           ls -la /tmp/tun2socks/
 
-          BINARY=$(find /tmp/tun2socks -maxdepth 2 -name "tun2socks" -type f | head -1)
+          # پیدا کردن باینری - هر فایل غیر ZIP
+          BINARY=$(find /tmp/tun2socks -maxdepth 2 -type f ! -name "*.zip" | head -1)
           if [ -z "$BINARY" ]; then
             echo "[tun2socks] ERROR: Binary not found!"
             exit 1
           fi
 
+          echo "[tun2socks] Found binary: $BINARY"
           cp "$BINARY" "$OUTPUT_FILE"
           chmod +x "$OUTPUT_FILE"
 
