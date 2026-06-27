@@ -13,7 +13,6 @@ import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.data.V2RayDatabase
 import com.example.data.V2RayRepository
-import com.example.data.ServerEntity
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
@@ -23,54 +22,46 @@ class V2RayVpnService : VpnService() {
 
     private var interfaceDescriptor: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
+    private var tun2socksProcess: Process? = null
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
     companion object {
         const val ACTION_START = "com.example.service.START"
-        const val ACTION_STOP = "com.example.service.STOP"
-        private const val CHANNEL_ID = "v2ray_vpn_service_channel"
-        private const val NOTIFICATION_ID = 1002
+        const val ACTION_STOP  = "com.example.service.STOP"
+        private const val CHANNEL_ID       = "v2ray_vpn_service_channel"
+        private const val NOTIFICATION_ID  = 1002
+        private const val SOCKS_PORT       = 10808
+        private const val TUN_ADDR         = "10.0.0.2"
+        private const val TUN_PREFIX       = 24
+        private const val TUN_MTU          = 1500
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // اگه intent == null یعنی START_STICKY سرویس رو restart کرده — سرور نداریم، stop کن
-        if (intent == null) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        val action = intent.action
-        if (action == ACTION_START) {
-            startVpn()
-        } else if (action == ACTION_STOP) {
-            stopVpn()
+        if (intent == null) { stopSelf(); return START_NOT_STICKY }
+        when (intent.action) {
+            ACTION_START -> startVpn()
+            ACTION_STOP  -> stopVpn()
         }
         return START_STICKY
     }
 
     private fun startVpn() {
         createNotificationChannel()
-        val intent = Intent(this, MainActivity::class.java)
-        
-        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent, pendingIntentFlags
+        val pi = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            else PendingIntent.FLAG_UPDATE_CURRENT
         )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("V2Ray Dan Core Active")
-            .setContentText("Connected in real tunnel mode. Routing all apps traffic through gateway.")
+        startForeground(NOTIFICATION_ID, NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("V2Ray Dan")
+            .setContentText("Connecting...")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(pi)
             .setOngoing(true)
             .build()
-
-        startForeground(NOTIFICATION_ID, notification)
+        )
 
         serviceScope.launch {
             val db = V2RayDatabase.getDatabase(applicationContext)
@@ -78,98 +69,161 @@ class V2RayVpnService : VpnService() {
             val server = repository.getSelectedServer()
 
             if (server == null) {
-                repository.log("VPN", "ERROR", "Cannot start VPN: No active server selected in client database.")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                stopSelf()
-                return@launch
+                repository.log("VPN", "ERROR", "No server selected.")
+                withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                stopSelf(); return@launch
             }
 
-            repository.log("VPN", "INFO", "Connecting to node: ${server.name} (${server.address}:${server.port})")
+            repository.log("VPN", "INFO", "Connecting to: ${server.name} (${server.address}:${server.port})")
 
-            // 1. Establish the TUN Interface
+            // ── 1. TUN interface ──────────────────────────────────────────
+            val fd: Int
             try {
-                repository.log("TUNNEL", "INFO", "Allocating local tun0 interface file descriptor...")
-                
                 val builder = Builder()
                     .setSession("V2RayDan")
-                    .addAddress("10.0.0.2", 24)
+                    .addAddress(TUN_ADDR, TUN_PREFIX)
                     .addRoute("0.0.0.0", 0)
-                    .setMtu(1500)
-
-                try {
-                    builder.addDisallowedApplication(packageName)
-                    repository.log("TUNNEL", "INFO", "Bypassed package to avoid routing loop: $packageName")
-                } catch (e: Exception) {
-                    repository.log("TUNNEL", "WARNING", "Could not add disallowed application exclusion: ${e.localizedMessage}")
-                }
+                    .setMtu(TUN_MTU)
+                try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
                 interfaceDescriptor = builder.establish()
-                if (interfaceDescriptor != null) {
-                    repository.log("TUNNEL", "SUCCESS", "Tun interface established successfully.")
-                } else {
-                    repository.log("TUNNEL", "ERROR", "VpnService.Builder returned null Interface. Check Android permissions.")
+                if (interfaceDescriptor == null) {
+                    repository.log("TUNNEL", "ERROR", "establish() returned null — check VPN permission.")
+                    withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                    stopSelf(); return@launch
                 }
+                fd = interfaceDescriptor!!.fd
+                repository.log("TUNNEL", "SUCCESS", "TUN interface established. fd=$fd")
             } catch (e: Exception) {
-                repository.log("TUNNEL", "ERROR", "Tunnel build failed: ${e.localizedMessage}")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                stopSelf()
-                return@launch
+                repository.log("TUNNEL", "ERROR", "TUN build failed: ${e.localizedMessage}")
+                withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                stopSelf(); return@launch
             }
 
-            // 2. Generate config JSON — بدون TUN inbound چون xray از fd environment variable پشتیبانی نمیکنه
-            val configJson = XrayConfigGenerator.generate(server, -1)
+            // ── 2. xray config ────────────────────────────────────────────
             val configFile = File(cacheDir, "xray_config.json")
             try {
-                configFile.writeText(configJson)
-                repository.log("CONFIG", "SUCCESS", "Config written to: ${configFile.absolutePath}")
+                // fd=-1 چون xray به عنوان SOCKS proxy کار میکنه، TUN رو tun2socks handle میکنه
+                configFile.writeText(XrayConfigGenerator.generate(server, -1))
+                repository.log("CONFIG", "SUCCESS", "Config written.")
             } catch (e: Exception) {
                 repository.log("CONFIG", "ERROR", "Failed to write config: ${e.localizedMessage}")
+                withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                stopSelf(); return@launch
             }
 
-            // 3. Locate and run xray binary
-            val binary = locateCoreBinary(applicationContext, repository)
-            if (binary == null || !binary.exists()) {
-                repository.log("XRAY-CORE", "ERROR", "Binary not found.")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                stopSelf()
-                return@launch
+            // ── 3. xray binary ────────────────────────────────────────────
+            val xrayBinary = locateBinary(applicationContext, repository, "libxray.so", "xray",
+                "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip", "xray")
+            if (xrayBinary == null) {
+                repository.log("XRAY-CORE", "ERROR", "xray binary not found.")
+                withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                stopSelf(); return@launch
             }
 
+            // ── 4. tun2socks binary ───────────────────────────────────────
+            val tun2socksBinary = locateBinary(applicationContext, repository, "libtun2socks.so", "tun2socks",
+                "https://github.com/xjasonlyu/tun2socks/releases/download/v2.5.2/tun2socks-android-arm64.zip", "tun2socks")
+            if (tun2socksBinary == null) {
+                repository.log("TUN2SOCKS", "ERROR", "tun2socks binary not found.")
+                withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                stopSelf(); return@launch
+            }
+
+            // ── 5. xray رو start کن ──────────────────────────────────────
             try {
-                repository.log("XRAY-CORE", "INFO", "Starting binary: ${binary.absolutePath}")
-
+                repository.log("XRAY-CORE", "INFO", "Starting xray...")
                 xrayProcess = ProcessBuilder()
-                    .command(binary.absolutePath, "-config", configFile.absolutePath)
+                    .command(xrayBinary.absolutePath, "-config", configFile.absolutePath)
                     .redirectErrorStream(true)
                     .start()
 
-                repository.log("XRAY-CORE", "SUCCESS", "Xray process started.")
+                // منتظر میمونیم xray آماده بشه (لاگ "started" بده)
+                var xrayReady = false
+                val xrayReader = BufferedReader(InputStreamReader(xrayProcess!!.inputStream))
+                val xrayLogJob = launch {
+                    var line: String?
+                    while (isActive) {
+                        line = withContext(Dispatchers.IO) { xrayReader.readLine() }
+                        if (line == null) break
+                        if (line.isNotBlank()) repository.log("XRAY-CORE", "INFO", line)
+                        if (!xrayReady && line.contains("started", ignoreCase = true)) {
+                            xrayReady = true
+                        }
+                    }
+                }
 
+                // حداکثر ۵ ثانیه صبر میکنیم xray ready بشه
+                var waited = 0
+                while (!xrayReady && waited < 50) {
+                    delay(100)
+                    waited++
+                }
+
+                if (!xrayReady) {
+                    repository.log("XRAY-CORE", "ERROR", "xray did not start within 5 seconds.")
+                    xrayLogJob.cancel()
+                    withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
+                    stopVpn(); return@launch
+                }
+
+                repository.log("XRAY-CORE", "SUCCESS", "xray is ready on SOCKS port $SOCKS_PORT.")
+
+                // ── 6. tun2socks رو start کن ─────────────────────────────
+                // tun2socks ترافیک TUN رو میگیره و به xray SOCKS میفرسته
+                repository.log("TUN2SOCKS", "INFO", "Starting tun2socks (fd=$fd → socks5://127.0.0.1:$SOCKS_PORT)...")
+                tun2socksProcess = ProcessBuilder()
+                    .command(
+                        tun2socksBinary.absolutePath,
+                        "-device", "fd://$fd",
+                        "-proxy", "socks5://127.0.0.1:$SOCKS_PORT",
+                        "-loglevel", "info"
+                    )
+                    .redirectErrorStream(true)
+                    .start()
+
+                // لاگ tun2socks
+                val t2sReader = BufferedReader(InputStreamReader(tun2socksProcess!!.inputStream))
+                var t2sReady = false
+                val tun2socksLogJob = launch {
+                    var line: String?
+                    while (isActive) {
+                        line = withContext(Dispatchers.IO) { t2sReader.readLine() }
+                        if (line == null) break
+                        if (line.isNotBlank()) repository.log("TUN2SOCKS", "INFO", line)
+                        if (!t2sReady && (
+                            line.contains("started", ignoreCase = true) ||
+                            line.contains("running", ignoreCase = true) ||
+                            line.contains("tun2socks", ignoreCase = true)
+                        )) {
+                            t2sReady = true
+                        }
+                    }
+                }
+
+                // حداکثر ۳ ثانیه صبر برای tun2socks
+                waited = 0
+                while (!t2sReady && waited < 30) {
+                    delay(100)
+                    waited++
+                }
+
+                repository.log("TUN2SOCKS", "SUCCESS", "tun2socks running. Traffic is now routed through xray.")
+
+                // ── 7. همه چیز آماده — CONNECTED ─────────────────────────
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED)
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
                 }
 
-                // خوندن لاگ‌های xray
-                val reader = BufferedReader(InputStreamReader(xrayProcess?.inputStream))
-                var line: String?
-                while (coroutineContext.isActive && xrayProcess != null) {
-                    line = withContext(Dispatchers.IO) { reader.readLine() }
-                    if (line == null) break
-                    if (line.isNotBlank()) repository.log("XRAY-CORE", "INFO", line)
-                }
+                // منتظر بمون تا یکی از پروسه‌ها exit کنه
+                xrayLogJob.join()
 
-                // اگه loop تموم شد یعنی xray exit کرد
+                // اگه اینجا رسیدیم یعنی xray exit کرد
                 if (coroutineContext.isActive) {
-                    val exitCode = try { xrayProcess?.waitFor() ?: -1 } catch (e: Exception) { -1 }
-                    repository.log("XRAY-CORE", "ERROR", "Core process exited unexpectedly with code: $exitCode")
-                    xrayProcess = null
+                    val code = try { xrayProcess?.waitFor() ?: -1 } catch (e: Exception) { -1 }
+                    repository.log("XRAY-CORE", "ERROR", "xray exited with code: $code")
+                    tun2socksLogJob.cancel()
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                         VpnCoreManager.activeVpnCoreManager?.stopTracking()
@@ -178,101 +232,104 @@ class V2RayVpnService : VpnService() {
                 }
 
             } catch (e: Exception) {
-                repository.log("XRAY-CORE", "ERROR", "Execution failed: ${e.localizedMessage}")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
+                repository.log("VPN", "ERROR", "Startup failed: ${e.localizedMessage}")
+                withContext(Dispatchers.Main) { VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR) }
                 stopSelf()
             }
         }
     }
 
     private fun stopVpn() {
-        // مستقیم و synchronous — بدون coroutine تا مطمئن بشیم اجرا میشه
-        try {
-            xrayProcess?.destroy()
-            xrayProcess = null
-        } catch (e: Exception) {
-            Log.e("VPN", "Failed to destroy xray process: ${e.localizedMessage}")
-        }
+        try { tun2socksProcess?.destroy(); tun2socksProcess = null } catch (e: Exception) { Log.e("VPN", "tun2socks destroy: ${e.localizedMessage}") }
+        try { xrayProcess?.destroy(); xrayProcess = null } catch (e: Exception) { Log.e("VPN", "xray destroy: ${e.localizedMessage}") }
+        try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) { Log.e("VPN", "TUN close: ${e.localizedMessage}") }
 
-        try {
-            interfaceDescriptor?.close()
-            interfaceDescriptor = null
-        } catch (e: Exception) {
-            Log.e("VPN", "Failed to close TUN interface: ${e.localizedMessage}")
-        }
-
-        // آپدیت state روی Main thread
         CoroutineScope(Dispatchers.Main).launch {
             VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.DISCONNECTED)
             VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
             VpnCoreManager.activeVpnCoreManager?.stopTracking()
         }
-
-        // لاگ در background
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val db = V2RayDatabase.getDatabase(applicationContext)
-                V2RayRepository(db).log("VPN", "INFO", "VPN disconnected successfully.")
+                V2RayRepository(db).log("VPN", "INFO", "VPN disconnected.")
             } catch (e: Exception) {}
         }
-
         stopForeground(true)
         stopSelf()
     }
 
-    private suspend fun downloadXrayBinary(context: Context, destination: File, repository: V2RayRepository): Boolean = withContext(Dispatchers.IO) {
-        val downloadUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
+    // ── helpers ───────────────────────────────────────────────────────────
+
+    private suspend fun locateBinary(
+        context: Context,
+        repository: V2RayRepository,
+        soName: String,
+        fileName: String,
+        downloadUrl: String,
+        zipEntry: String
+    ): File? {
+        // اول nativeLibraryDir
+        val native = File(context.applicationInfo.nativeLibraryDir, soName)
+        if (native.exists() && native.length() > 1000) {
+            repository.log("SYSTEM", "SUCCESS", "$soName found in nativeLibraryDir (${native.length()} bytes)")
+            return native
+        }
+
+        // بعد filesDir
+        val local = File(context.filesDir, fileName)
+        if (!local.exists() || local.length() < 1000) {
+            repository.log("SYSTEM", "INFO", "$fileName not found. Downloading...")
+            val ok = downloadBinary(context, repository, downloadUrl, zipEntry, local)
+            if (!ok) { repository.log("SYSTEM", "ERROR", "Failed to obtain $fileName."); return null }
+        }
+
+        local.setReadable(true, false)
+        local.setExecutable(true, false)
+        local.setExecutable(true, true)
+        try { Runtime.getRuntime().exec(arrayOf("chmod", "755", local.absolutePath)).waitFor() } catch (e: Exception) {}
+        return local
+    }
+
+    private suspend fun downloadBinary(
+        context: Context,
+        repository: V2RayRepository,
+        url: String,
+        zipEntry: String,
+        destination: File
+    ): Boolean = withContext(Dispatchers.IO) {
         try {
-            repository.log("SYSTEM", "INFO", "Downloading Xray core binary from: $downloadUrl")
-            
-            val tempFile = File(context.cacheDir, "temp_xray_download")
-            if (tempFile.exists()) tempFile.delete()
+            repository.log("SYSTEM", "INFO", "Downloading $url ...")
+            val tmp = File(context.cacheDir, "tmp_download_${destination.name}")
+            if (tmp.exists()) tmp.delete()
 
-            java.net.URL(downloadUrl).openStream().use { input ->
-                tempFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
+            java.net.URL(url).openStream().use { it.copyTo(tmp.outputStream()) }
+            repository.log("SYSTEM", "SUCCESS", "Downloaded ${tmp.length()} bytes.")
 
-            repository.log("SYSTEM", "SUCCESS", "Download finished. Size: ${tempFile.length()} bytes.")
-
-            val isZip = try {
-                java.util.zip.ZipInputStream(tempFile.inputStream()).use { it.nextEntry != null }
-            } catch (e: Exception) { false }
-
+            val isZip = try { java.util.zip.ZipInputStream(tmp.inputStream()).use { it.nextEntry != null } } catch (e: Exception) { false }
             if (isZip) {
-                repository.log("SYSTEM", "INFO", "Extracting xray binary from ZIP...")
                 var extracted = false
-                java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
-                    var entry = zipInput.nextEntry
+                java.util.zip.ZipInputStream(tmp.inputStream()).use { zip ->
+                    var entry = zip.nextEntry
                     while (entry != null) {
-                        if (entry.name == "xray" || entry.name.endsWith("/xray")) {
-                            destination.outputStream().use { zipInput.copyTo(it) }
-                            extracted = true
-                            break
+                        if (entry.name == zipEntry || entry.name.endsWith("/$zipEntry")) {
+                            destination.outputStream().use { zip.copyTo(it) }
+                            extracted = true; break
                         }
-                        entry = zipInput.nextEntry
+                        entry = zip.nextEntry
                     }
                 }
-                tempFile.delete()
-                if (!extracted) {
-                    repository.log("SYSTEM", "ERROR", "Could not find xray binary in ZIP.")
-                    return@withContext false
-                }
+                tmp.delete()
+                if (!extracted) { repository.log("SYSTEM", "ERROR", "$zipEntry not found in ZIP."); return@withContext false }
             } else {
-                tempFile.renameTo(destination)
+                tmp.renameTo(destination)
             }
 
             destination.setReadable(true, false)
             destination.setExecutable(true, false)
             destination.setExecutable(true, true)
-            try {
-                Runtime.getRuntime().exec(arrayOf("chmod", "755", destination.absolutePath)).waitFor()
-            } catch (e: Exception) {}
-
-            repository.log("SYSTEM", "SUCCESS", "Binary ready at: ${destination.absolutePath}")
+            try { Runtime.getRuntime().exec(arrayOf("chmod", "755", destination.absolutePath)).waitFor() } catch (e: Exception) {}
+            repository.log("SYSTEM", "SUCCESS", "${destination.name} ready.")
             return@withContext true
         } catch (e: Exception) {
             repository.log("SYSTEM", "ERROR", "Download failed: ${e.localizedMessage}")
@@ -280,54 +337,18 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
-        val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
-        val nativeBinary = File(nativeLibDir, "libxray.so")
-        if (nativeBinary.exists() && nativeBinary.length() > 1000) {
-            repository.log("SYSTEM", "SUCCESS", "Found binary in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes)")
-            return nativeBinary
-        }
-
-        repository.log("SYSTEM", "WARNING", "libxray.so not found in nativeLibraryDir. Trying filesDir...")
-
-        val filesBinary = File(context.filesDir, "xray")
-        if (!filesBinary.exists() || filesBinary.length() < 1000) {
-            repository.log("SYSTEM", "INFO", "Binary missing or too small. Starting download...")
-            val success = downloadXrayBinary(context, filesBinary, repository)
-            if (!success) {
-                repository.log("SYSTEM", "ERROR", "All binary location attempts failed.")
-                return null
-            }
-        }
-
-        if (filesBinary.exists()) {
-            filesBinary.setReadable(true, false)
-            filesBinary.setExecutable(true, false)
-            filesBinary.setExecutable(true, true)
-            try {
-                Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath)).waitFor()
-            } catch (e: Exception) {}
-        }
-
-        return filesBinary
-    }
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                CHANNEL_ID,
-                "V2Ray Dan System Status Channel",
-                NotificationManager.IMPORTANCE_LOW
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "V2Ray Dan", NotificationManager.IMPORTANCE_LOW)
             )
-            getSystemService(NotificationManager::class.java)?.createNotificationChannel(serviceChannel)
         }
     }
 
     override fun onDestroy() {
-        // اول xray و TUN رو ببند
+        try { tun2socksProcess?.destroy(); tun2socksProcess = null } catch (e: Exception) {}
         try { xrayProcess?.destroy(); xrayProcess = null } catch (e: Exception) {}
         try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) {}
-        // بعد job رو cancel کن
         serviceJob.cancel()
         super.onDestroy()
     }
