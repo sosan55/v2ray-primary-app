@@ -233,23 +233,15 @@ tasks.register("downloadTun2socks") {
                     }
                 }
                 println("Download complete. Extracting tun2socks...")
-                var extracted = false
-                java.util.zip.ZipInputStream(tempZip.inputStream()).use { zipInput ->
-                    var entry = zipInput.nextEntry
-                    while (entry != null) {
-                        if (entry.name.contains("tun2socks") && !entry.isDirectory) {
-                            jniLibFile.outputStream().use { zipInput.copyTo(it) }
-                            extracted = true
-                            println("Extracted tun2socks to $jniLibFile")
-                            break
-                        }
-                        entry = zipInput.nextEntry
+                zipTree(tempZip).forEach { extractedFile ->
+                    if (!extractedFile.isDirectory && extractedFile.name.contains("tun2socks")) {
+                        extractedFile.copyTo(jniLibFile, overwrite = true)
+                        println("Extracted tun2socks to $jniLibFile")
                     }
                 }
-                if (!extracted) {
-                    // اگه zip نبود، مستقیم ذخیره کن
+                if (!jniLibFile.exists()) {
                     tempZip.copyTo(jniLibFile, overwrite = true)
-                    println("Saved tun2socks binary directly to $jniLibFile")
+                    println("Saved tun2socks binary directly.")
                 }
             } catch (e: java.lang.Exception) {
                 println("Error downloading tun2socks: ${e.message}")
