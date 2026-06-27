@@ -108,7 +108,7 @@ class V2RayVpnService : VpnService() {
             }
 
             // ── 2. config ─────────────────────────────────────────────────
-            val configJson = XrayConfigGenerator.generate(server, -1)
+            val configJson = XrayConfigGenerator.generate(server, fd)
             repository.log("CONFIG", "SUCCESS", "Config ready.")
 
             // ── 3. xray via JNI با fd مستقیم ─────────────────────────────
