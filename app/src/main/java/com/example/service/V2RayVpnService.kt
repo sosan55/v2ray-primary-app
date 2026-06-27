@@ -139,7 +139,7 @@ class V2RayVpnService : VpnService() {
                 repository.log("XRAY-CORE", "INFO", "Starting xray via JNI (fd=$fd)...")
 
                 // StartLoop مستقیماً fd رو میگیره — مشکل fd sharing نداره
-                controller.startLoop(configJson, fd.toLong())
+                controller.startLoop(configJson, fd)
 
                 repository.log("XRAY-CORE", "SUCCESS", "xray started via JNI.")
                 withContext(Dispatchers.Main) {
