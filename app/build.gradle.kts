@@ -207,7 +207,7 @@ tasks.register("downloadXrayCore") {
     }
 }
 
-tasks.named("preBuild") {
-    dependsOn("downloadXrayCore")
-}
+// tasks.named("preBuild") {
+//     dependsOn("downloadXrayCore")
+// }
 
