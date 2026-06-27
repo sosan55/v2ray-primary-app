@@ -207,6 +207,62 @@ tasks.register("downloadXrayCore") {
     }
 }
 
+
+tasks.register("downloadTun2socks") {
+    group = "build setup"
+    description = "Downloads tun2socks arm64 binary and places it in jniLibs"
+
+    val tun2socksUrl = "https://github.com/xjasonlyu/tun2socks/releases/download/v2.5.2/tun2socks-android-arm64.zip"
+    val outputDir = file("src/main/jniLibs/arm64-v8a")
+    val jniLibFile = file("src/main/jniLibs/arm64-v8a/libtun2socks.so")
+
+    inputs.property("tun2socksUrl", tun2socksUrl)
+    outputs.file(jniLibFile)
+
+    doLast {
+        if (!jniLibFile.exists() || jniLibFile.length() < 500_000) {
+            outputDir.mkdirs()
+            val tempZip = file("build/tmp/tun2socks-android-arm64.zip")
+            tempZip.parentFile.mkdirs()
+
+            println("Downloading tun2socks from $tun2socksUrl ...")
+            try {
+                URL(tun2socksUrl).openStream().use { input ->
+                    tempZip.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                println("Download complete. Extracting tun2socks...")
+                var extracted = false
+                java.util.zip.ZipInputStream(tempZip.inputStream()).use { zipInput ->
+                    var entry = zipInput.nextEntry
+                    while (entry != null) {
+                        if (entry.name.contains("tun2socks") && !entry.isDirectory) {
+                            jniLibFile.outputStream().use { zipInput.copyTo(it) }
+                            extracted = true
+                            println("Extracted tun2socks to $jniLibFile")
+                            break
+                        }
+                        entry = zipInput.nextEntry
+                    }
+                }
+                if (!extracted) {
+                    // اگه zip نبود، مستقیم ذخیره کن
+                    tempZip.copyTo(jniLibFile, overwrite = true)
+                    println("Saved tun2socks binary directly to $jniLibFile")
+                }
+            } catch (e: java.lang.Exception) {
+                println("Error downloading tun2socks: ${e.message}")
+                throw e
+            } finally {
+                if (tempZip.exists()) tempZip.delete()
+            }
+        } else {
+            println("libtun2socks.so already exists, skipping download.")
+        }
+    }
+}
+
 tasks.named("preBuild") {
-    dependsOn("downloadXrayCore")
+    dependsOn("downloadXrayCore", "downloadTun2socks")
 }
