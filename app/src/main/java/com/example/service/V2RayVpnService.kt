@@ -34,7 +34,12 @@ class V2RayVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
+        // اگه intent == null یعنی START_STICKY سرویس رو restart کرده — سرور نداریم، stop کن
+        if (intent == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        val action = intent.action
         if (action == ACTION_START) {
             startVpn()
         } else if (action == ACTION_STOP) {
@@ -83,14 +88,14 @@ class V2RayVpnService : VpnService() {
 
             repository.log("VPN", "INFO", "Connecting to node: ${server.name} (${server.address}:${server.port})")
 
-            // 1. Establish the TUN Interface with requested routes and exclude our own package to prevent routing loop
+            // 1. Establish the TUN Interface
             try {
                 repository.log("TUNNEL", "INFO", "Allocating local tun0 interface file descriptor...")
                 
                 val builder = Builder()
                     .setSession("V2RayDan")
-                    .addAddress("10.0.0.2", 24) // Internal tunnel IP
-                    .addRoute("0.0.0.0", 0)    // High priority global routing
+                    .addAddress("10.0.0.2", 24)
+                    .addRoute("0.0.0.0", 0)
                     .setMtu(1500)
 
                 try {
@@ -102,7 +107,7 @@ class V2RayVpnService : VpnService() {
 
                 interfaceDescriptor = builder.establish()
                 if (interfaceDescriptor != null) {
-                    repository.log("TUNNEL", "SUCCESS", "Tun interface established. FD allocated successfully. Routing global out.")
+                    repository.log("TUNNEL", "SUCCESS", "Tun interface established successfully.")
                 } else {
                     repository.log("TUNNEL", "ERROR", "VpnService.Builder returned null Interface. Check Android permissions.")
                 }
@@ -115,78 +120,65 @@ class V2RayVpnService : VpnService() {
                 return@launch
             }
 
-            val fdNum = interfaceDescriptor?.fd ?: -1
-
-            // 2. Generate real configuration JSON string using the allocated file descriptor
-            val configJson = XrayConfigGenerator.generate(server, fdNum)
+            // 2. Generate config JSON — بدون TUN inbound چون xray از fd environment variable پشتیبانی نمیکنه
+            val configJson = XrayConfigGenerator.generate(server, -1)
             val configFile = File(cacheDir, "xray_config.json")
             try {
                 configFile.writeText(configJson)
-                repository.log("CONFIG", "SUCCESS", "Generated real client config format with Tun/FD support. Path: ${configFile.absolutePath}")
+                repository.log("CONFIG", "SUCCESS", "Config written to: ${configFile.absolutePath}")
             } catch (e: Exception) {
-                repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
+                repository.log("CONFIG", "ERROR", "Failed to write config: ${e.localizedMessage}")
             }
 
-            // 3. Discover and execute core binary process
+            // 3. Locate and run xray binary
             val binary = locateCoreBinary(applicationContext, repository)
             if (binary == null || !binary.exists()) {
-                repository.log("XRAY-CORE", "ERROR", "Xray/V2Ray compiled binary could not be found or copied. Please ensure a valid executable fits at assets.")
+                repository.log("XRAY-CORE", "ERROR", "Binary not found.")
                 withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED) // Transition anyway to show logs setup
+                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
+                stopSelf()
                 return@launch
             }
 
             try {
-                repository.log("XRAY-CORE", "INFO", "Executing core binary daemon: ${binary.absolutePath}")
-                
-                val commandList = mutableListOf<String>()
-                commandList.add(binary.absolutePath)
-                commandList.add("-config")
-                commandList.add(configFile.absolutePath)
+                repository.log("XRAY-CORE", "INFO", "Starting binary: ${binary.absolutePath}")
 
-                val processBuilder = ProcessBuilder()
-                    .command(commandList)
+                xrayProcess = ProcessBuilder()
+                    .command(binary.absolutePath, "-config", configFile.absolutePath)
                     .redirectErrorStream(true)
+                    .start()
 
-                if (fdNum != -1) {
-                    processBuilder.environment()["VPN_TUN_FD"] = fdNum.toString()
-                    processBuilder.environment()["TUN_FD"] = fdNum.toString()
-                    repository.log("TUNNEL", "SUCCESS", "Tethered TUN interface descriptor (fd: $fdNum) of VpnService to background core process successfully.")
-                }
+                repository.log("XRAY-CORE", "SUCCESS", "Xray process started.")
 
-                xrayProcess = processBuilder.start()
-
-                repository.log("XRAY-CORE", "SUCCESS", "Process spawned successfully with process ID: ${xrayProcess.hashCode()}")
-                
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED)
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
                 }
 
-                // Pipe real stdout/stderr to repository logs in real-time
+                // خوندن لاگ‌های xray
                 val reader = BufferedReader(InputStreamReader(xrayProcess?.inputStream))
                 var line: String?
                 while (coroutineContext.isActive && xrayProcess != null) {
                     line = withContext(Dispatchers.IO) { reader.readLine() }
                     if (line == null) break
-                    if (line.isNotBlank()) {
-                        repository.log("XRAY-CORE", "INFO", line)
-                    }
+                    if (line.isNotBlank()) repository.log("XRAY-CORE", "INFO", line)
                 }
 
-                // اگه process کرش کرد یا exit شد، state رو آپدیت کن
-                val exitCode = try { xrayProcess?.waitFor() ?: -1 } catch (e: Exception) { -1 }
-                repository.log("XRAY-CORE", "ERROR", "Core process exited unexpectedly with code: $exitCode")
-                xrayProcess = null
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                    VpnCoreManager.activeVpnCoreManager?.stopTracking()
+                // اگه loop تموم شد یعنی xray exit کرد
+                if (coroutineContext.isActive) {
+                    val exitCode = try { xrayProcess?.waitFor() ?: -1 } catch (e: Exception) { -1 }
+                    repository.log("XRAY-CORE", "ERROR", "Core process exited unexpectedly with code: $exitCode")
+                    xrayProcess = null
+                    withContext(Dispatchers.Main) {
+                        VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                        VpnCoreManager.activeVpnCoreManager?.stopTracking()
+                    }
+                    stopSelf()
                 }
-                stopSelf()
 
             } catch (e: Exception) {
-                repository.log("XRAY-CORE", "ERROR", "Execution fail: ${e.localizedMessage}")
+                repository.log("XRAY-CORE", "ERROR", "Execution failed: ${e.localizedMessage}")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
@@ -195,10 +187,45 @@ class V2RayVpnService : VpnService() {
         }
     }
 
+    private fun stopVpn() {
+        // مستقیم و synchronous — بدون coroutine تا مطمئن بشیم اجرا میشه
+        try {
+            xrayProcess?.destroy()
+            xrayProcess = null
+        } catch (e: Exception) {
+            Log.e("VPN", "Failed to destroy xray process: ${e.localizedMessage}")
+        }
+
+        try {
+            interfaceDescriptor?.close()
+            interfaceDescriptor = null
+        } catch (e: Exception) {
+            Log.e("VPN", "Failed to close TUN interface: ${e.localizedMessage}")
+        }
+
+        // آپدیت state روی Main thread
+        CoroutineScope(Dispatchers.Main).launch {
+            VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.DISCONNECTED)
+            VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
+            VpnCoreManager.activeVpnCoreManager?.stopTracking()
+        }
+
+        // لاگ در background
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val db = V2RayDatabase.getDatabase(applicationContext)
+                V2RayRepository(db).log("VPN", "INFO", "VPN disconnected successfully.")
+            } catch (e: Exception) {}
+        }
+
+        stopForeground(true)
+        stopSelf()
+    }
+
     private suspend fun downloadXrayBinary(context: Context, destination: File, repository: V2RayRepository): Boolean = withContext(Dispatchers.IO) {
         val downloadUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
         try {
-            repository.log("SYSTEM", "INFO", "Initiating runtime download of Xray core binary from: $downloadUrl")
+            repository.log("SYSTEM", "INFO", "Downloading Xray core binary from: $downloadUrl")
             
             val tempFile = File(context.cacheDir, "temp_xray_download")
             if (tempFile.exists()) tempFile.delete()
@@ -211,25 +238,18 @@ class V2RayVpnService : VpnService() {
 
             repository.log("SYSTEM", "SUCCESS", "Download finished. Size: ${tempFile.length()} bytes.")
 
-            // Check if it is a ZIP archive
             val isZip = try {
-                java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
-                    zipInput.nextEntry != null
-                }
-            } catch (e: Exception) {
-                false
-            }
+                java.util.zip.ZipInputStream(tempFile.inputStream()).use { it.nextEntry != null }
+            } catch (e: Exception) { false }
 
             if (isZip) {
-                repository.log("SYSTEM", "INFO", "Downloaded archive is a ZIP file. Extracting 'xray' dynamic binary...")
+                repository.log("SYSTEM", "INFO", "Extracting xray binary from ZIP...")
                 var extracted = false
                 java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
                     var entry = zipInput.nextEntry
                     while (entry != null) {
                         if (entry.name == "xray" || entry.name.endsWith("/xray")) {
-                            destination.outputStream().use { output ->
-                                zipInput.copyTo(output)
-                            }
+                            destination.outputStream().use { zipInput.copyTo(it) }
                             extracted = true
                             break
                         }
@@ -238,123 +258,58 @@ class V2RayVpnService : VpnService() {
                 }
                 tempFile.delete()
                 if (!extracted) {
-                    repository.log("SYSTEM", "ERROR", "Could not locate 'xray' executable within the downloaded ZIP package.")
+                    repository.log("SYSTEM", "ERROR", "Could not find xray binary in ZIP.")
                     return@withContext false
                 }
             } else {
-                // If it's a raw executable binary, shift it directly to destination
-                repository.log("SYSTEM", "INFO", "Downloaded file is a raw binary. Saving directly...")
                 tempFile.renameTo(destination)
             }
 
-            // Set executable privileges
             destination.setReadable(true, false)
-            val execOwner = destination.setExecutable(true, false)
-            val execAll = destination.setExecutable(true, true)
-            
+            destination.setExecutable(true, false)
+            destination.setExecutable(true, true)
             try {
-                val chmod = Runtime.getRuntime().exec(arrayOf("chmod", "755", destination.absolutePath))
-                chmod.waitFor()
-                repository.log("SYSTEM", "SUCCESS", "Run-time chmod 755 execution succeeded on downloaded core binary.")
-            } catch (e: Exception) {
-                repository.log("SYSTEM", "WARNING", "System security shell chmod output: ${e.localizedMessage}")
-            }
+                Runtime.getRuntime().exec(arrayOf("chmod", "755", destination.absolutePath)).waitFor()
+            } catch (e: Exception) {}
 
-            repository.log("SYSTEM", "SUCCESS", "Runtime core binary download and extraction complete.")
+            repository.log("SYSTEM", "SUCCESS", "Binary ready at: ${destination.absolutePath}")
             return@withContext true
         } catch (e: Exception) {
-            repository.log("SYSTEM", "ERROR", "Failed download sequence of core binary: ${e.localizedMessage}")
+            repository.log("SYSTEM", "ERROR", "Download failed: ${e.localizedMessage}")
             return@withContext false
         }
     }
 
     private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
-        // 1. Primary check on Android 10+: ALWAYS check the nativeLibraryDir first!
-        // This is the read-only directory managed by Package Manager where files can be executed.
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
         val nativeBinary = File(nativeLibDir, "libxray.so")
         if (nativeBinary.exists() && nativeBinary.length() > 1000) {
-            repository.log("SYSTEM", "SUCCESS", "Located standard executable library in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes)")
+            repository.log("SYSTEM", "SUCCESS", "Found binary in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes)")
             return nativeBinary
         }
 
-        repository.log("SYSTEM", "WARNING", "libxray.so not found or too small in nativeLibraryDir. Attempting backup download or placeholder load...")
+        repository.log("SYSTEM", "WARNING", "libxray.so not found in nativeLibraryDir. Trying filesDir...")
 
         val filesBinary = File(context.filesDir, "xray")
-        
-        // Check if the file is absent or just a tiny placeholder (< 1000 bytes)
-        val needsDownload = !filesBinary.exists() || filesBinary.length() < 1000
-
-        if (needsDownload) {
-            repository.log("SYSTEM", "INFO", "Xray core binary on filesDir is missing or a placeholder. Starting download...")
-            val downloadSuccess = downloadXrayBinary(context, filesBinary, repository)
-            if (!downloadSuccess) {
-                repository.log("SYSTEM", "WARNING", "Direct download failed. Falling back to native shared library or assets...")
-                
-                // Fallback 1: Native binary preinstalled in nativeLibraryDir (checked again just in case)
-                if (nativeBinary.exists()) {
-                    repository.log("SYSTEM", "INFO", "Fallback located executable library in nativeLibraryDir: ${nativeBinary.name}")
-                    return nativeBinary
-                }
-                
-                // Fallback 2: Extract from assets placeholder (as a last resort failure backup)
-                try {
-                    repository.log("SYSTEM", "INFO", "Extracting fallback placeholder from assets to files directory: ${filesBinary.absolutePath}")
-                    context.assets.open("xray").use { input ->
-                        filesBinary.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                } catch (e: Exception) {
-                    repository.log("SYSTEM", "ERROR", "Failed to write placeholder: ${e.localizedMessage}")
-                }
+        if (!filesBinary.exists() || filesBinary.length() < 1000) {
+            repository.log("SYSTEM", "INFO", "Binary missing or too small. Starting download...")
+            val success = downloadXrayBinary(context, filesBinary, repository)
+            if (!success) {
+                repository.log("SYSTEM", "ERROR", "All binary location attempts failed.")
+                return null
             }
         }
 
-        // Ensure execution permissions on filesBinary (if it exists)
         if (filesBinary.exists()) {
             filesBinary.setReadable(true, false)
-            val p1 = filesBinary.setExecutable(true, false)
-            val p2 = filesBinary.setExecutable(true, true)
+            filesBinary.setExecutable(true, false)
+            filesBinary.setExecutable(true, true)
             try {
-                val chmodProcess = Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath))
-                chmodProcess.waitFor()
+                Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath)).waitFor()
             } catch (e: Exception) {}
         }
 
         return filesBinary
-    }
-
-    private fun stopVpn() {
-        serviceScope.launch {
-            val db = V2RayDatabase.getDatabase(applicationContext)
-            val repository = V2RayRepository(db)
-            repository.log("VPN", "INFO", "Disconnecting client tunnel session...")
-
-            // Terminate background process
-            try {
-                xrayProcess?.destroy()
-                xrayProcess = null
-                repository.log("XRAY-CORE", "WARNING", "Xray daemon process killed gracefully.")
-            } catch (e: Exception) {
-                repository.log("XRAY-CORE", "ERROR", "Failed to destroy core daemon: ${e.localizedMessage}")
-            }
-
-            // Close tunnel interface
-            try {
-                interfaceDescriptor?.close()
-                interfaceDescriptor = null
-                repository.log("TUNNEL", "SUCCESS", "Tun interface closed. Network routes released back to system.")
-            } catch (e: Exception) {
-                repository.log("TUNNEL", "ERROR", "Failed to close Tun interface: ${e.localizedMessage}")
-            }
-
-            withContext(Dispatchers.Main) {
-                VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.DISCONNECTED)
-                VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
-                VpnCoreManager.activeVpnCoreManager?.stopTracking()
-            }
-        }
     }
 
     private fun createNotificationChannel() {
@@ -364,13 +319,15 @@ class V2RayVpnService : VpnService() {
                 "V2Ray Dan System Status Channel",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(serviceChannel)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(serviceChannel)
         }
     }
 
     override fun onDestroy() {
-        stopVpn()
+        // اول xray و TUN رو ببند
+        try { xrayProcess?.destroy(); xrayProcess = null } catch (e: Exception) {}
+        try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) {}
+        // بعد job رو cancel کن
         serviceJob.cancel()
         super.onDestroy()
     }
