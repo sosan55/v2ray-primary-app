@@ -13,15 +13,14 @@ import com.example.MainActivity
 import com.example.data.V2RayDatabase
 import com.example.data.V2RayRepository
 import kotlinx.coroutines.*
+import libv2ray.CoreCallbackHandler
+import libv2ray.CoreController
 import libv2ray.Libv2ray
-import libv2ray.V2RayPoint
-import libv2ray.V2RayVPNServiceSupportsSet
-import java.io.File
 
 class V2RayVpnService : VpnService() {
 
     private var interfaceDescriptor: ParcelFileDescriptor? = null
-    private var v2rayPoint: V2RayPoint? = null
+    private var coreController: CoreController? = null
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
@@ -108,49 +107,28 @@ class V2RayVpnService : VpnService() {
                 stopSelf(); return@launch
             }
 
-            // ── 2. xray config ────────────────────────────────────────────
-            val configJson = buildConfig(fd, server)
-            val configFile = File(cacheDir, "xray_config.json")
+            // ── 2. config ─────────────────────────────────────────────────
+            val configJson = XrayConfigGenerator.generate(server, -1)
+            repository.log("CONFIG", "SUCCESS", "Config ready.")
+
+            // ── 3. xray via JNI با fd مستقیم ─────────────────────────────
             try {
-                configFile.writeText(configJson)
-                repository.log("CONFIG", "SUCCESS", "Config written.")
-            } catch (e: Exception) {
-                repository.log("CONFIG", "ERROR", "Failed to write config: ${e.localizedMessage}")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                stopSelf(); return@launch
-            }
+                // Init asset path برای geoip/geosite
+                Libv2ray.initCoreEnv(filesDir.absolutePath, "")
 
-            // ── 3. xray via JNI ───────────────────────────────────────────
-            try {
-                val vpnSupport = object : V2RayVPNServiceSupportsSet {
-                    override fun shutdown(): Long { stopVpn(); return 0 }
-                    override fun prepare(): Long = 0
-                    override fun protect(l: Long): Boolean = protect(l.toInt())
-                    override fun onEmitStatus(l: Long, s: String?): Long {
-                        Log.d("XRAY-JNI", "Status[$l]: $s")
-                        return 0
+                val callbackHandler = object : CoreCallbackHandler {
+                    override fun onStatusChanged(status: Long, info: String?) {
+                        Log.d("XRAY-JNI", "Status[$status]: $info")
                     }
-                    override fun setup(s: String?): Long = 0
                 }
 
-                val point = Libv2ray.newV2RayPoint(vpnSupport, false)
-                v2rayPoint = point
-                point.configureFileLocationAsset = filesDir.absolutePath
-                point.domainName = server.address
-                point.configureV2Ray(configJson)
+                val controller = Libv2ray.newCoreController(callbackHandler)
+                coreController = controller
 
-                repository.log("XRAY-CORE", "INFO", "Starting xray via JNI...")
-                val result = point.runLoop(false)
+                repository.log("XRAY-CORE", "INFO", "Starting xray via JNI (fd=$fd)...")
 
-                if (result != 0L) {
-                    repository.log("XRAY-CORE", "ERROR", "xray JNI failed. Code: $result")
-                    withContext(Dispatchers.Main) {
-                        VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                    }
-                    stopSelf(); return@launch
-                }
+                // StartLoop مستقیماً fd رو میگیره — مشکل fd sharing نداره
+                controller.startLoop(configJson, fd.toLong())
 
                 repository.log("XRAY-CORE", "SUCCESS", "xray started via JNI.")
                 withContext(Dispatchers.Main) {
@@ -168,62 +146,13 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    private fun buildConfig(fd: Int, server: com.example.data.ServerEntity): String {
-        val outbound = XrayConfigGenerator.generate(server, -1)
-        // outbounds رو از config generator استخراج میکنیم
-        val outbounds = extractOutbounds(outbound)
-        return """
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "port": 10808,
-      "listen": "127.0.0.1",
-      "protocol": "socks",
-      "settings": { "auth": "noauth", "udp": true },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
-    },
-    {
-      "tag": "tun-in",
-      "protocol": "dokodemo-door",
-      "port": 10801,
-      "listen": "127.0.0.1",
-      "settings": { "network": "tcp,udp", "followRedirect": true },
-      "streamSettings": { "sockopt": { "tproxy": "tproxy" } }
-    }
-  ],
-  "outbounds": $outbounds,
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-      { "type": "field", "ip": ["geoip:private"], "outboundTag": "direct" }
-    ]
-  }
-}
-        """.trimIndent()
-    }
-
-    private fun extractOutbounds(config: String): String {
-        return try {
-            val start = config.indexOf("\"outbounds\"")
-            val arrStart = config.indexOf('[', start)
-            var depth = 0
-            var end = arrStart
-            for (i in arrStart until config.length) {
-                when (config[i]) {
-                    '[', '{' -> depth++
-                    ']', '}' -> { depth--; if (depth == 0) { end = i; break } }
-                }
-            }
-            config.substring(arrStart, end + 1)
-        } catch (e: Exception) {
-            """[{"protocol":"freedom","settings":{},"tag":"proxy"},{"protocol":"freedom","settings":{},"tag":"direct"}]"""
-        }
-    }
-
     private fun stopVpn() {
-        try { v2rayPoint?.stopLoop(); v2rayPoint = null } catch (e: Exception) { Log.e("VPN", "xray stop: ${e.localizedMessage}") }
-        try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) { Log.e("VPN", "TUN close: ${e.localizedMessage}") }
+        try { coreController?.stopLoop(); coreController = null } catch (e: Exception) {
+            Log.e("VPN", "xray stop: ${e.localizedMessage}")
+        }
+        try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) {
+            Log.e("VPN", "TUN close: ${e.localizedMessage}")
+        }
 
         CoroutineScope(Dispatchers.Main).launch {
             VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.DISCONNECTED)
@@ -249,7 +178,7 @@ class V2RayVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        try { v2rayPoint?.stopLoop(); v2rayPoint = null } catch (e: Exception) {}
+        try { coreController?.stopLoop(); coreController = null } catch (e: Exception) {}
         try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) {}
         serviceJob.cancel()
         super.onDestroy()
