@@ -84,6 +84,7 @@ object XrayConfigGenerator {
                   {
                     "id": "${server.uuid}",
                     "encryption": "none",
+                    "flow": "${if (server.security.lowercase() == "reality") "xtls-rprx-vision" else ""}",
                     "level": 0
                   }
                 ]
@@ -145,7 +146,6 @@ object XrayConfigGenerator {
     }
 
     private fun generateShadowsocksOutbound(server: ServerEntity): String {
-        // ss stores method:password inside UUID field
         val creds = server.uuid.split(":")
         val method = if (creds.size > 0) creds[0] else "aes-256-gcm"
         val password = if (creds.size > 1) creds[1] else "mypassword"
@@ -182,17 +182,50 @@ object XrayConfigGenerator {
     }
 
     private fun generateStreamSettings(server: ServerEntity): String {
-        val securityStr = if (server.tls) "tls" else "none"
-        val securityConfig = if (server.tls) {
-            val sniToUse = server.sni.ifEmpty { server.address }
-            """
+        // تشخیص REALITY: فیلد security برابر "reality" باشه
+        val isReality = server.security.lowercase() == "reality"
+
+        val securityStr = when {
+            isReality -> "reality"
+            server.tls  -> "tls"
+            else        -> "none"
+        }
+
+        val securityConfig = when {
+            isReality -> {
+                // فیلدهای مورد نیاز REALITY:
+                //   server.sni      → serverName هدف (مثلاً "www.google.com")
+                //   server.uuid     → publicKey سرور (در مود REALITY جای UUID استفاده میشه)
+                //   server.host     → shortId (اختیاری، میتونه خالی باشه)
+                //   server.path     → fingerprint مرورگر ("chrome" | "firefox" | "safari" | ...)
+                val sniToUse      = server.sni.ifEmpty { "www.google.com" }
+                val publicKey     = server.uuid
+                val shortId       = server.host.ifEmpty { "" }
+                val fingerprint   = server.path.ifEmpty { "chrome" }
+                """
+            "realitySettings": {
+              "show": false,
+              "fingerprint": "$fingerprint",
+              "serverName": "$sniToUse",
+              "publicKey": "$publicKey",
+              "shortId": "$shortId",
+              "spiderX": "/"
+            }
+                """
+            }
+            server.tls -> {
+                val sniToUse = server.sni.ifEmpty { server.address }
+                """
             "tlsSettings": {
               "serverName": "$sniToUse",
               "allowInsecure": true
             }
-            """
-        } else ""
+                """
+            }
+            else -> ""
+        }
 
+        // REALITY معمولاً روی tcp کار میکنه؛ ws و grpc هم پشتیبانی میشن
         val transportConfig = when (server.network.lowercase()) {
             "ws" -> """
             "wsSettings": {
