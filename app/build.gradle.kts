@@ -212,7 +212,7 @@ tasks.register("downloadTun2socks") {
     group = "build setup"
     description = "Downloads tun2socks arm64 binary and places it in jniLibs"
 
-    val tun2socksUrl = "https://github.com/xjasonlyu/tun2socks/releases/download/v2.5.2/tun2socks-android-arm64.zip"
+    val tun2socksUrl = "https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-arm64.zip"
     val outputDir = file("src/main/jniLibs/arm64-v8a")
     val jniLibFile = file("src/main/jniLibs/arm64-v8a/libtun2socks.so")
 
@@ -234,7 +234,7 @@ tasks.register("downloadTun2socks") {
                 }
                 println("Download complete. Extracting tun2socks...")
                 zipTree(tempZip).forEach { extractedFile ->
-                    if (!extractedFile.isDirectory && extractedFile.name.contains("tun2socks")) {
+                    if (!extractedFile.isDirectory && (extractedFile.name == "tun2socks" || extractedFile.name.contains("tun2socks"))) {
                         extractedFile.copyTo(jniLibFile, overwrite = true)
                         println("Extracted tun2socks to $jniLibFile")
                     }
