@@ -174,7 +174,7 @@ tasks.register("downloadXrayCore") {
     outputs.file(jniLibFile)
 
     doLast {
-        if (true || !jniLibFile.exists() || jniLibFile.length() < 1_000_000) {
+        if (!jniLibFile.exists() || jniLibFile.length() < 1_000_000) {
             outputDir.mkdirs()
             val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
             tempZip.parentFile.mkdirs()
