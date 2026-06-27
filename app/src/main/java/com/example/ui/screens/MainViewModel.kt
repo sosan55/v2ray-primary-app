@@ -121,7 +121,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 val currentActive = activeServer.value
                 val context = getApplication<Application>()
-                val vpnIntent = android.net.VpnService.prepare(context)
+                val vpnIntent = try {
+                    android.net.VpnService.prepare(context)
+                } catch (e: Exception) {
+                    repository.log("VPN", "WARNING", "VpnService.prepare bypassed: ${e.localizedMessage}")
+                    null
+                }
                 if (vpnIntent != null) {
                     _vpnPermissionRequest.tryEmit(vpnIntent)
                 } else {

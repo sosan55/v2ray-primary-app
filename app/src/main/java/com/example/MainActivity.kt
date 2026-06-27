@@ -52,7 +52,11 @@ class MainActivity : ComponentActivity() {
         // Observe VPN permission requests from ViewModel
         lifecycleScope.launch {
             mainViewModel.vpnPermissionRequest.collect { intent ->
-                vpnPrepareLauncher.launch(intent)
+                try {
+                    vpnPrepareLauncher.launch(intent)
+                } catch (e: Exception) {
+                    mainViewModel.toggleVpnAfterPermission()
+                }
             }
         }
     }
