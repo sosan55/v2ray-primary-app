@@ -40,7 +40,7 @@ class V2RayVpnService : VpnService() {
         } else if (action == ACTION_STOP) {
             stopVpn()
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun startVpn() {
@@ -174,11 +174,23 @@ class V2RayVpnService : VpnService() {
                         repository.log("XRAY-CORE", "INFO", line)
                     }
                 }
+
+                // اگه process کرش کرد یا exit شد، state رو آپدیت کن
+                val exitCode = try { xrayProcess?.waitFor() ?: -1 } catch (e: Exception) { -1 }
+                repository.log("XRAY-CORE", "ERROR", "Core process exited unexpectedly with code: $exitCode")
+                xrayProcess = null
+                withContext(Dispatchers.Main) {
+                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                    VpnCoreManager.activeVpnCoreManager?.stopTracking()
+                }
+                stopSelf()
+
             } catch (e: Exception) {
                 repository.log("XRAY-CORE", "ERROR", "Execution fail: ${e.localizedMessage}")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
+                stopSelf()
             }
         }
     }
