@@ -172,6 +172,12 @@ class V2RayVpnService : VpnService() {
                 // ── 6. tun2socks رو start کن ─────────────────────────────
                 // tun2socks ترافیک TUN رو میگیره و به xray SOCKS میفرسته
                 repository.log("TUN2SOCKS", "INFO", "Starting tun2socks (fd=$fd → socks5://127.0.0.1:$SOCKS_PORT)...")
+
+                // fd رو برای child process قابل دسترس کن
+                try {
+                    Runtime.getRuntime().exec(arrayOf("chmod", "777", "/proc/self/fd/$fd")).waitFor()
+                } catch (e: Exception) {}
+
                 tun2socksProcess = ProcessBuilder()
                     .command(
                         tun2socksBinary.absolutePath,
@@ -180,6 +186,10 @@ class V2RayVpnService : VpnService() {
                         "-loglevel", "info"
                     )
                     .redirectErrorStream(true)
+                    .also { pb ->
+                        // مطمئن میشیم environment درست تنظیم شده
+                        pb.environment()["LD_LIBRARY_PATH"] = applicationInfo.nativeLibraryDir
+                    }
                     .start()
 
                 // لاگ tun2socks
