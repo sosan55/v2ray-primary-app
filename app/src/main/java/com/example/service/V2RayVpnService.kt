@@ -117,8 +117,19 @@ class V2RayVpnService : VpnService() {
                 Libv2ray.initCoreEnv(filesDir.absolutePath, "")
 
                 val callbackHandler = object : CoreCallbackHandler {
-                    override fun onStatusChanged(status: Long, info: String?) {
-                        Log.d("XRAY-JNI", "Status[$status]: $info")
+                    override fun onEmitStatus(p0: Long, p1: String?): Long {
+                        Log.d("XRAY-JNI", "Status[$p0]: $p1")
+                        return 0L
+                    }
+
+                    override fun shutdown(): Long {
+                        Log.d("XRAY-JNI", "Core shutdown callback")
+                        return 0L
+                    }
+
+                    override fun startup(): Long {
+                        Log.d("XRAY-JNI", "Core startup callback")
+                        return 0L
                     }
                 }
 
