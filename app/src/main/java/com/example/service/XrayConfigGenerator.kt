@@ -13,18 +13,19 @@ object XrayConfigGenerator {
             else -> generateFreedomOutbound()
         }
 
+        // طبق مستندات رسمی xray-core (proxy/tun/README.md):
+        // - این inbound روی هیچ پورتی listen نمی‌کنه (port باید 0 باشه)
+        // - فقط "name" و "MTU" لازمه
+        // - fd از طریق env var "xray.tun.fd" که خودِ StartLoop ست می‌کنه به xray میرسه
+        //   (نیازی به فرستادن fd داخل JSON نیست)
         val tunInboundOpt = if (fd != -1) {
             """,
             {
-              "protocol": "tun",
               "port": 0,
+              "protocol": "tun",
               "settings": {
-                "stack": "gvisor",
-                "name": "tun0",
-                "mtu": 1500,
-                "fileDescriptor": $fd,
-                "file_descriptor": $fd,
-                "fd": $fd,
+                "name": "xray0",
+                "MTU": 1500,
                 "sniffing": {
                   "enabled": true,
                   "destOverride": ["http", "tls", "quic"]
@@ -193,11 +194,6 @@ object XrayConfigGenerator {
 
         val securityConfig = when {
             isReality -> {
-                // فیلدهای مورد نیاز REALITY:
-                //   server.sni      → serverName هدف (مثلاً "www.google.com")
-                //   server.uuid     → publicKey سرور (در مود REALITY جای UUID استفاده میشه)
-                //   server.host     → shortId (اختیاری، میتونه خالی باشه)
-                //   server.path     → fingerprint مرورگر ("chrome" | "firefox" | "safari" | ...)
                 val sniToUse      = server.sni.ifEmpty { "www.google.com" }
                 val publicKey     = server.uuid
                 val shortId       = server.host.ifEmpty { "" }
@@ -225,7 +221,6 @@ object XrayConfigGenerator {
             else -> ""
         }
 
-        // REALITY معمولاً روی tcp کار میکنه؛ ws و grpc هم پشتیبانی میشن
         val transportConfig = when (server.network.lowercase()) {
             "ws" -> """
             "wsSettings": {
