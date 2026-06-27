@@ -20,11 +20,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val repository = V2RayRepository(database)
     val vpnCoreManager = VpnCoreManager(application, repository)
 
-    // Flow for VPN integration requests from MainActivity
     private val _vpnPermissionRequest = MutableSharedFlow<android.content.Intent>(extraBufferCapacity = 1)
     val vpnPermissionRequest = _vpnPermissionRequest.asSharedFlow()
 
-    // Data flows from DB
     val servers: StateFlow<List<ServerEntity>> = repository.allServers
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -37,28 +35,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val logs: StateFlow<List<LogEntity>> = repository.logs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // UI flows from simulated Core Service
     val vpnState: StateFlow<VpnState> = vpnCoreManager.vpnState
     val speedState: StateFlow<SpeedState> = vpnCoreManager.speedState
     val connectionDuration: StateFlow<Long> = vpnCoreManager.connectionDuration
     val connectedServer: StateFlow<ServerEntity?> = vpnCoreManager.connectedServer
 
-    // Activity indicator states
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
     private val _isTestingPing = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
     val isTestingPing: StateFlow<Map<Long, Boolean>> = _isTestingPing.asStateFlow()
 
-    // Background optimizer service active status and launcher toggle (Disabled from root)
     val isAutoConnectActive: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
 
     fun toggleAutoConnect() {
-        // Disabled from root as requested
+        // Disabled
     }
 
-    // Preferences configuration (Saved locally inside DB or simple local memory)
-    private val _routingMode = MutableStateFlow("Bypass LAN & Mainland") // Bypass LAN & Mainland, Global, Direct
+    private val _routingMode = MutableStateFlow("Bypass LAN & Mainland")
     val routingMode: StateFlow<String> = _routingMode.asStateFlow()
 
     private val _dnsServer = MutableStateFlow("1.1.1.1")
@@ -68,48 +62,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val bypassList: StateFlow<Boolean> = _bypassList.asStateFlow()
 
     init {
-        // Seed default servers if the DB is empty on first launch
+        // هیچ سرور پیش‌فرضی اضافه نمیشه — کاربر باید خودش subscription یا سرور اضافه کنه
         viewModelScope.launch(Dispatchers.IO) {
-            val currentServers = repository.allServers.first()
-            if (currentServers.isEmpty()) {
-                repository.log("SYSTEM", "INFO", "First launch detected. Instantiating high-performance secure gate servers...")
-                val defaultGateways = listOf(
-                    ServerEntity(
-                        name = "🇺🇸 United States - Aurora G-Port",
-                        type = "VLESS",
-                        address = "us-gport.v2raydan.xyz",
-                        port = 443,
-                        uuid = "21e28fa0-0d2d-419f-b9d9-930ecf9cf719",
-                        tls = true,
-                        sni = "us-gport.v2raydan.xyz"
-                    ),
-                    ServerEntity(
-                        name = "🇬🇧 London Cloud Node-03",
-                        type = "VMESS",
-                        address = "uk-cloud.v2raydan.xyz",
-                        port = 8443,
-                        uuid = "3196edbb-0e2e-43fa-a6f6-43d9203eff3a",
-                        network = "ws",
-                        path = "/vmess-ws",
-                        tls = true
-                    ),
-                    ServerEntity(
-                        name = "🇯🇵 Tokyo Low-Latency Edge",
-                        type = "TROJAN",
-                        address = "jp-edge.v2raydan.xyz",
-                        port = 443,
-                        uuid = "jp-psw-danvpn",
-                        tls = true,
-                        sni = "jp-edge.v2raydan.xyz"
-                    )
-                )
-                repository.insertServers(defaultGateways)
-                // Select the first one as active by default
-                val firstId = repository.allServers.first().firstOrNull()?.id
-                if (firstId != null) {
-                    repository.selectServer(firstId)
-                }
-            }
+            repository.log("SYSTEM", "INFO", "App started. Waiting for user to add servers or subscriptions.")
         }
     }
 
@@ -145,7 +100,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectServer(server: ServerEntity) {
         viewModelScope.launch {
-            // If connected, we should stop and reconnect to the new server
             val isRunning = vpnState.value == VpnState.CONNECTED || vpnState.value == VpnState.CONNECTING
             if (isRunning) {
                 vpnCoreManager.stopVpn()
@@ -187,7 +141,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteServer(server: ServerEntity) {
         viewModelScope.launch {
             repository.deleteServer(server)
-            // If selected server was deleted, elect a new one
             val active = activeServer.value
             if (active?.id == server.id) {
                 val remaining = servers.value.filter { it.id != server.id }
@@ -208,24 +161,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pingAllServers() {
         viewModelScope.launch {
-            val list = servers.value
-            list.forEach { s ->
-                triggerPing(s.id)
-            }
+            servers.value.forEach { s -> triggerPing(s.id) }
         }
     }
 
     fun setRoutingMode(mode: String) {
         _routingMode.value = mode
         viewModelScope.launch {
-            repository.log("ROUTING", "INFO", "Changed proxy routing strategy to: $mode")
+            repository.log("ROUTING", "INFO", "Changed routing mode to: $mode")
         }
     }
 
     fun setDnsServer(dns: String) {
         _dnsServer.value = dns
         viewModelScope.launch {
-            repository.log("SYSTEM", "INFO", "Updated DNS server address: $dns")
+            repository.log("SYSTEM", "INFO", "Updated DNS: $dns")
         }
     }
 
@@ -238,9 +188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteSubscription(sub: SubscriptionEntity) {
         viewModelScope.launch {
             repository.deleteSubscription(sub)
-            viewModelScope.launch {
-                repository.log("SUBSCRIPTION", "WARNING", "Removed subscription file: ${sub.name}")
-            }
+            repository.log("SUBSCRIPTION", "WARNING", "Removed subscription: ${sub.name}")
         }
     }
 
@@ -249,10 +197,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isSyncing.value = true
             val subs = subscriptions.value
             if (subs.isEmpty()) {
-                repository.log("SUBSCRIPTION", "WARNING", "No custom subscriptions configured. Creating standard demo feeds...")
-                val demoSubId = repository.addSubscription("🚀 UltraFast CDN Network", "https://v2raydan.xyz/sub/feed?key=v2raydan-demo")
-                val sampleSub = SubscriptionEntity(id = demoSubId, name = "🚀 UltraFast CDN Network", url = "https://v2raydan.xyz/sub/feed?key=v2raydan-demo")
-                repository.syncSubscription(sampleSub)
+                // هیچ subscription‌ای نیست — به کاربر اطلاع بده
+                repository.log("SUBSCRIPTION", "WARNING", "No subscriptions configured. Please add a subscription URL first.")
             } else {
                 subs.forEach { sub ->
                     repository.syncSubscription(sub)
@@ -267,7 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return if (parsed != null) {
             viewModelScope.launch {
                 repository.addServer(parsed)
-                repository.log("USER", "SUCCESS", "Parsed and imported server link of type ${parsed.type}!")
+                repository.log("USER", "SUCCESS", "Imported server: ${parsed.type} - ${parsed.name}")
             }
             true
         } else {
