@@ -73,6 +73,9 @@ object XrayConfigGenerator {
 
     private fun generateVlessOutbound(server: ServerEntity): String {
         val streamSettingsJson = generateStreamSettings(server)
+        val flowValue = server.flow.ifEmpty {
+            if (server.security.lowercase() == "reality") "xtls-rprx-vision" else ""
+        }
         return """
         {
           "protocol": "vless",
@@ -85,7 +88,7 @@ object XrayConfigGenerator {
                   {
                     "id": "${server.uuid}",
                     "encryption": "none",
-                    "flow": "${if (server.security.lowercase() == "reality") "xtls-rprx-vision" else ""}",
+                    "flow": "$flowValue",
                     "level": 0
                   }
                 ]
@@ -194,10 +197,15 @@ object XrayConfigGenerator {
 
         val securityConfig = when {
             isReality -> {
+                // فیلدهای واقعی REALITY که الان از پارسر می‌آن:
+                //   server.sni          → serverName هدف (مثلاً "www.google.com")
+                //   server.publicKey    → publicKey سرور (پارامتر pbk)
+                //   server.shortId      → shortId (پارامتر sid)
+                //   server.fingerprint  → fingerprint مرورگر (پارامتر fp)
                 val sniToUse      = server.sni.ifEmpty { "www.google.com" }
-                val publicKey     = server.uuid
-                val shortId       = server.host.ifEmpty { "" }
-                val fingerprint   = server.path.ifEmpty { "chrome" }
+                val publicKey     = server.publicKey
+                val shortId       = server.shortId
+                val fingerprint   = server.fingerprint.ifEmpty { "chrome" }
                 """
             "realitySettings": {
               "show": false,
