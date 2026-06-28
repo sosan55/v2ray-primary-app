@@ -43,24 +43,37 @@ class V2RayVpnService : VpnService() {
         return START_STICKY
     }
 
-    private fun startVpn() {
-        createNotificationChannel()
+    // ── Notification helpers ───────────────────────────────────────────
+    //
+    // پیش‌تر متن نوتیفیکیشن فقط یک بار در startForeground() ساخته می‌شد
+    // و بعد از آن هیچ‌جا آپدیت نمی‌شد، در نتیجه همیشه روی "Connecting..."
+    // باقی می‌ماند حتی بعد از اتصال موفق. این دو متد، notification را
+    // واقعاً بر اساس وضعیت فعلی اتصال به‌روزرسانی می‌کنند.
+
+    private fun buildNotification(contentText: String): android.app.Notification {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             else PendingIntent.FLAG_UPDATE_CURRENT
         )
-        startForeground(
-            NOTIFICATION_ID,
-            NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("V2Ray Dan")
-                .setContentText("Connecting...")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentIntent(pi)
-                .setOngoing(true)
-                .build()
-        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("V2Ray Dan")
+            .setContentText(contentText)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun updateNotification(contentText: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.notify(NOTIFICATION_ID, buildNotification(contentText))
+    }
+
+    private fun startVpn() {
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
 
         serviceScope.launch {
             val db = V2RayDatabase.getDatabase(applicationContext)
@@ -72,6 +85,7 @@ class V2RayVpnService : VpnService() {
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
+                updateNotification("Connection failed: no server selected")
                 stopSelf(); return@launch
             }
 
@@ -95,6 +109,7 @@ class V2RayVpnService : VpnService() {
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                     }
+                    updateNotification("Connection failed: VPN interface error")
                     stopSelf(); return@launch
                 }
                 fd = interfaceDescriptor!!.fd
@@ -104,6 +119,7 @@ class V2RayVpnService : VpnService() {
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
+                updateNotification("Connection failed: VPN interface error")
                 stopSelf(); return@launch
             }
 
@@ -118,6 +134,10 @@ class V2RayVpnService : VpnService() {
 
                 val callbackHandler = object : CoreCallbackHandler {
                     override fun onEmitStatus(p0: Long, p1: String?): Long {
+                        // این callback از هسته‌ی xray می‌آید و صرفاً برای لاگ/دیباگ
+                        // استفاده می‌شود؛ نباید مستقیماً وضعیت اتصال یا متن نوتیفیکیشن
+                        // را از اینجا تغییر دهد، چون معنای p0/p1 مستقل از موفقیت یا
+                        // شکست واقعی startLoop است.
                         Log.d("XRAY-JNI", "Status[$p0]: $p1")
                         return 0L
                     }
@@ -146,12 +166,15 @@ class V2RayVpnService : VpnService() {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED)
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
                 }
+                // نوتیفیکیشن را به وضعیت واقعی (متصل) آپدیت می‌کنیم
+                updateNotification("Connected to ${server.name}")
 
             } catch (e: Exception) {
                 repository.log("VPN", "ERROR", "JNI startup failed: ${e.localizedMessage}")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
+                updateNotification("Connection failed")
                 stopSelf()
             }
         }
