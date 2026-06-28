@@ -104,14 +104,14 @@ class V2RayRepository(private val db: V2RayDatabase) {
         var parsedCount = 0
         try {
             log("SUBSCRIPTION", "INFO", "Syncing subscription: ${subscription.name} url: ${subscription.url}")
-            
+
             // Fetch subscription body
             val connection = URL(subscription.url).openConnection() as HttpURLConnection
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             connection.requestMethod = "GET"
             connection.setRequestProperty("User-Agent", "v2rayNG/1.8.5 (Android)")
-            
+
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
                 val reader = BufferedReader(InputStreamReader(connection.inputStream))
@@ -145,7 +145,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     serverDao.insertServers(parsedConfigs)
                     parsedCount = parsedConfigs.size
                     log("SUBSCRIPTION", "SUCCESS", "Successfully imported $parsedCount servers from subscription ${subscription.name}")
-                    
+
                     // Update subscription timestamp
                     subscriptionDao.insertSubscription(subscription.copy(lastUpdated = System.currentTimeMillis()))
                 } else {
@@ -230,7 +230,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
 
                 val uuid = rawBody.substring(0, atIndex)
                 val address = if (colonIndex != -1) rawBody.substring(atIndex + 1, colonIndex) else rawBody.substring(atIndex + 1)
-                
+
                 val portStr = if (colonIndex != -1) {
                     if (questionIndex != -1) rawBody.substring(colonIndex + 1, questionIndex)
                     else rawBody.substring(colonIndex + 1)
@@ -241,22 +241,39 @@ class V2RayRepository(private val db: V2RayDatabase) {
                 var sni = ""
                 var network = "tcp"
                 var path = ""
+                var host = ""
                 var name = "VLESS Server"
+                var security = "none"
+                var flow = ""
+                var publicKey = ""
+                var shortId = ""
+                var fingerprint = ""
 
                 if (questionIndex != -1) {
                     val queryAndHash = rawBody.substring(questionIndex + 1)
                     val hashIndex = queryAndHash.indexOf('#')
                     val query = if (hashIndex != -1) queryAndHash.substring(0, hashIndex) else queryAndHash
-                    
+
                     if (hashIndex != -1) {
                         name = URLDecoder.decode(queryAndHash.substring(hashIndex + 1))
                     }
 
                     val params = parseQueryParams(query)
-                    tls = params["security"]?.lowercase() == "tls" || params["tls"] == "true"
+
+                    // security می‌تونه "tls" یا "reality" یا "none" باشه
+                    security = params["security"]?.lowercase() ?: "none"
+                    tls = security == "tls" || security == "reality" || params["tls"] == "true"
+
                     sni = params["sni"] ?: ""
                     network = params["type"] ?: params["network"] ?: "tcp"
                     path = params["path"] ?: ""
+                    host = params["host"] ?: ""
+                    flow = params["flow"] ?: ""
+
+                    // فیلدهای مخصوص REALITY
+                    publicKey = params["pbk"] ?: ""
+                    shortId = params["sid"] ?: ""
+                    fingerprint = params["fp"] ?: ""
                 }
 
                 return ServerEntity(
@@ -268,7 +285,13 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     tls = tls,
                     sni = sni,
                     network = network,
-                    path = path
+                    path = path,
+                    host = host,
+                    security = security,
+                    flow = flow,
+                    publicKey = publicKey,
+                    shortId = shortId,
+                    fingerprint = fingerprint
                 )
             } else if (link.startsWith("vmess://")) {
                 // vmess links are either base64 encoded strings of JSON configurations
@@ -328,10 +351,10 @@ class V2RayRepository(private val db: V2RayDatabase) {
                 val atIndex = rawBody.indexOf('@')
                 val colonIndex = rawBody.indexOf(':', atIndex)
                 val questionIndex = rawBody.indexOf('?', colonIndex)
-                
+
                 val password = rawBody.substring(0, atIndex)
                 val address = if (colonIndex != -1) rawBody.substring(atIndex + 1, colonIndex) else rawBody.substring(atIndex + 1)
-                
+
                 val portStr = if (colonIndex != -1) {
                     if (questionIndex != -1) rawBody.substring(colonIndex + 1, questionIndex)
                     else rawBody.substring(colonIndex + 1)
@@ -346,7 +369,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     val queryAndHash = rawBody.substring(questionIndex + 1)
                     val hashIndex = queryAndHash.indexOf('#')
                     val query = if (hashIndex != -1) queryAndHash.substring(0, hashIndex) else queryAndHash
-                    
+
                     if (hashIndex != -1) {
                         name = URLDecoder.decode(queryAndHash.substring(hashIndex + 1))
                     }
