@@ -13,11 +13,6 @@ object XrayConfigGenerator {
             else -> generateFreedomOutbound()
         }
 
-        // طبق مستندات رسمی xray-core (proxy/tun/README.md):
-        // - این inbound روی هیچ پورتی listen نمی‌کنه (port باید 0 باشه)
-        // - فقط "name" و "MTU" لازمه
-        // - fd از طریق env var "xray.tun.fd" که خودِ StartLoop ست می‌کنه به xray میرسه
-        //   (نیازی به فرستادن fd داخل JSON نیست)
         val tunInboundOpt = if (fd != -1) {
             """,
             {
@@ -36,25 +31,20 @@ object XrayConfigGenerator {
             ""
         }
 
-        // 👈 بخش Routing اضافه شد برای دور زدن ترافیک داخلی و ایران
+        // تغییر استراتژی به IPIfNonMatch برای جلوگیری از کرش در صورت عدم بارگذاری صحیح دیتابیس
         val routingRules = """
           "routing": {
-            "domainStrategy": "AsIs",
+            "domainStrategy": "IPIfNonMatch",
             "rules": [
               {
                 "type": "field",
                 "outboundTag": "direct",
-                "domain": [
-                  "geosite:ir"
-                ]
+                "domain": ["geosite:ir"]
               },
               {
                 "type": "field",
                 "outboundTag": "direct",
-                "ip": [
-                  "geoip:private",
-                  "geoip:ir"
-                ]
+                "ip": ["geoip:private", "geoip:ir"]
               }
             ]
           },
@@ -105,25 +95,21 @@ object XrayConfigGenerator {
         {
           "protocol": "vless",
           "settings": {
-            "vnext": [
-              {
-                "address": "${server.address}",
-                "port": ${server.port},
-                "users": [
-                  {
-                    "id": "${server.uuid}",
-                    "encryption": "none",
-                    "flow": "$flowValue",
-                    "level": 0
-                  }
-                ]
-              }
-            ]
+            "vnext": [{
+              "address": "${server.address}",
+              "port": ${server.port},
+              "users": [{
+                "id": "${server.uuid}",
+                "encryption": "none",
+                "flow": "$flowValue",
+                "level": 0
+              }]
+            }]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """
+        """.trimIndent()
     }
 
     private fun generateVmessOutbound(server: ServerEntity): String {
@@ -132,25 +118,21 @@ object XrayConfigGenerator {
         {
           "protocol": "vmess",
           "settings": {
-            "vnext": [
-              {
-                "address": "${server.address}",
-                "port": ${server.port},
-                "users": [
-                  {
-                    "id": "${server.uuid}",
-                    "alterId": ${server.alterId},
-                    "security": "${server.security.ifEmpty { "auto" }}",
-                    "level": 0
-                  }
-                ]
-              }
-            ]
+            "vnext": [{
+              "address": "${server.address}",
+              "port": ${server.port},
+              "users": [{
+                "id": "${server.uuid}",
+                "alterId": ${server.alterId},
+                "security": "${server.security.ifEmpty { "auto" }}",
+                "level": 0
+              }]
+            }]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """
+        """.trimIndent()
     }
 
     private fun generateTrojanOutbound(server: ServerEntity): String {
@@ -159,24 +141,22 @@ object XrayConfigGenerator {
         {
           "protocol": "trojan",
           "settings": {
-            "servers": [
-              {
-                "address": "${server.address}",
-                "port": ${server.port},
-                "password": "${server.uuid}",
-                "level": 0
-              }
-            ]
+            "servers": [{
+              "address": "${server.address}",
+              "port": ${server.port},
+              "password": "${server.uuid}",
+              "level": 0
+            }]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """
+        """.trimIndent()
     }
 
     private fun generateShadowsocksOutbound(server: ServerEntity): String {
         val creds = server.uuid.split(":")
-        val method = if (creds.size > 0) creds[0] else "aes-256-gcm"
+        val method = if (creds.isNotEmpty()) creds[0] else "aes-256-gcm"
         val password = if (creds.size > 1) creds[1] else "mypassword"
         val streamSettingsJson = generateStreamSettings(server)
 
@@ -184,73 +164,45 @@ object XrayConfigGenerator {
         {
           "protocol": "shadowsocks",
           "settings": {
-            "servers": [
-              {
-                "address": "${server.address}",
-                "port": ${server.port},
-                "method": "$method",
-                "password": "$password",
-                "level": 0
-              }
-            ]
+            "servers": [{
+              "address": "${server.address}",
+              "port": ${server.port},
+              "method": "$method",
+              "password": "$password",
+              "level": 0
+            }]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """
+        """.trimIndent()
     }
 
-    private fun generateFreedomOutbound(): String {
-        return """
-        {
-          "protocol": "freedom",
-          "settings": {},
-          "tag": "proxy"
-        }
-        """
-    }
+    private fun generateFreedomOutbound(): String = """{"protocol": "freedom", "settings": {}, "tag": "proxy"}"""
 
     private fun generateStreamSettings(server: ServerEntity): String {
-        // تشخیص REALITY: فیلد security برابر "reality" باشه
         val isReality = server.security.lowercase() == "reality"
-
         val securityStr = when {
             isReality -> "reality"
-            server.tls  -> "tls"
-            else        -> "none"
+            server.tls -> "tls"
+            else -> "none"
         }
 
         val securityConfig = when {
-            isReality -> {
-                // فیلدهای واقعی REALITY که الان از پارسر می‌آن:
-                //   server.sni         → serverName هدف (مثلاً "www.google.com")
-                //   server.publicKey   → publicKey سرور (پارامتر pbk)
-                //   server.shortId     → shortId (پارامتر sid)
-                //   server.fingerprint → fingerprint مرورگر (پارامتر fp)
-                val sniToUse      = server.sni.ifEmpty { "www.google.com" }
-                val publicKey     = server.publicKey
-                val shortId       = server.shortId
-                val fingerprint   = server.fingerprint.ifEmpty { "chrome" }
-                """
+            isReality -> """
             "realitySettings": {
               "show": false,
-              "fingerprint": "$fingerprint",
-              "serverName": "$sniToUse",
-              "publicKey": "$publicKey",
-              "shortId": "$shortId",
+              "fingerprint": "${server.fingerprint.ifEmpty { "chrome" }}",
+              "serverName": "${server.sni.ifEmpty { "www.google.com" }}",
+              "publicKey": "${server.publicKey}",
+              "shortId": "${server.shortId}",
               "spiderX": "/"
-            }
-                """
-            }
-            server.tls -> {
-                val sniToUse = server.sni.ifEmpty { server.address }
-                """
+            }""".trimIndent()
+            server.tls -> """
             "tlsSettings": {
-              "serverName": "$sniToUse",
+              "serverName": "${server.sni.ifEmpty { server.address }}",
               "allowInsecure": true
-            }
-                """
-            }
+            }""".trimIndent()
             else -> ""
         }
 
@@ -258,30 +210,24 @@ object XrayConfigGenerator {
             "ws" -> """
             "wsSettings": {
               "path": "${server.path.ifEmpty { "/" }}",
-              "headers": {
-                "Host": "${server.host.ifEmpty { server.address }}"
-              }
-            }
-            """
+              "headers": { "Host": "${server.host.ifEmpty { server.address }}" }
+            }""".trimIndent()
             "grpc" -> """
-            "grpcSettings": {
-              "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}"
-            }
-            """
+            "grpcSettings": { "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}" }""".trimIndent()
             else -> ""
         }
 
-        val separator = if (securityConfig.isNotEmpty() && transportConfig.isNotEmpty()) "," else ""
+        val parts = mutableListOf<String>()
+        if (securityConfig.isNotEmpty()) parts.add(securityConfig)
+        if (transportConfig.isNotEmpty()) parts.add(transportConfig)
 
         return """
         {
           "network": "${server.network.lowercase().ifEmpty { "tcp" }}",
           "security": "$securityStr"
-          ${if (securityConfig.isNotEmpty() || transportConfig.isNotEmpty()) "," else ""}
-          $securityConfig
-          $separator
-          $transportConfig
+          ${if (parts.isNotEmpty()) "," else ""}
+          ${parts.joinToString(",")}
         }
-        """
+        """.trimIndent()
     }
 }
