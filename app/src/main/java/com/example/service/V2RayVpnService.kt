@@ -44,28 +44,6 @@ class V2RayVpnService : VpnService() {
         return START_STICKY
     }
 
-    // ── Notification helpers ───────────────────────────────────────────
-    private fun buildNotification(contentText: String): android.app.Notification {
-        val pi = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            else PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("V2Ray Dan")
-            .setContentText(contentText)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .build()
-    }
-
-    private fun updateNotification(contentText: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm?.notify(NOTIFICATION_ID, buildNotification(contentText))
-    }
-
     private fun startVpn() {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
@@ -77,14 +55,8 @@ class V2RayVpnService : VpnService() {
 
             if (server == null) {
                 repository.log("VPN", "ERROR", "No server selected.")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                updateNotification("Connection failed: no server selected")
                 stopSelf(); return@launch
             }
-
-            repository.log("VPN", "INFO", "Connecting to: ${server.name} (${server.address}:${server.port})")
 
             // ── 1. TUN interface ──────────────────────────────────────────
             val fd: Int
@@ -99,135 +71,81 @@ class V2RayVpnService : VpnService() {
                 try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
 
                 interfaceDescriptor = builder.establish()
-                if (interfaceDescriptor == null) {
-                    repository.log("TUNNEL", "ERROR", "establish() returned null.")
-                    withContext(Dispatchers.Main) {
-                        VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                    }
-                    updateNotification("Connection failed: VPN interface error")
-                    stopSelf(); return@launch
-                }
+                if (interfaceDescriptor == null) return@launch
                 fd = interfaceDescriptor!!.fd
-                repository.log("TUNNEL", "SUCCESS", "TUN established. fd=$fd")
             } catch (e: Exception) {
-                repository.log("TUNNEL", "ERROR", "TUN build failed: ${e.localizedMessage}")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                updateNotification("Connection failed: VPN interface error")
                 stopSelf(); return@launch
             }
 
-            // ── 2. config ─────────────────────────────────────────────────
-            val configJson = XrayConfigGenerator.generate(server, fd)
-            repository.log("CONFIG", "SUCCESS", "Config ready.")
-
-            // ── 3. xray via JNI با fd مستقیم ─────────────────────────────
+            // ── 2. Xray Initialization ──────────────────────────────────
             try {
-                // کپی کردن فایل‌های دیتابیس لوکال مسیریابی از Assets به حافظه دستگاه (در صورت نیاز)
+                // کپی فایل‌های دیتابیس به مسیر فایل‌های اپلیکیشن
                 copyAssetFileIfNeeded("geoip.dat")
                 copyAssetFileIfNeeded("geosite.dat")
 
-                // Init asset path برای geoip/geosite
+                // ست کردن مسیر محیطی هسته برای پیدا کردن دیتابیس‌ها
                 Libv2ray.initCoreEnv(filesDir.absolutePath, "")
+                Log.d("XRAY_CORE", "Core initialized at: ${filesDir.absolutePath}")
 
-                val callbackHandler = object : CoreCallbackHandler {
-                    override fun onEmitStatus(p0: Long, p1: String?): Long {
-                        Log.d("XRAY-JNI", "Status[$p0]: $p1")
-                        return 0L
-                    }
+                val configJson = XrayConfigGenerator.generate(server, fd)
 
-                    override fun shutdown(): Long {
-                        Log.d("XRAY-JNI", "Core shutdown callback")
-                        return 0L
-                    }
-
-                    override fun startup(): Long {
-                        Log.d("XRAY-JNI", "Core startup callback")
-                        return 0L
-                    }
-                }
-
-                val controller = Libv2ray.newCoreController(callbackHandler)
+                val controller = Libv2ray.newCoreController(object : CoreCallbackHandler {
+                    override fun onEmitStatus(p0: Long, p1: String?): Long = 0L
+                    override fun shutdown(): Long = 0L
+                    override fun startup(): Long = 0L
+                })
+                
                 coreController = controller
-
-                repository.log("XRAY-CORE", "INFO", "Starting xray via JNI (fd=$fd)...")
-
-                // StartLoop مستقیماً fd رو میگیره — مشکل fd sharing نداره
                 controller.startLoop(configJson, fd)
-
-                repository.log("XRAY-CORE", "SUCCESS", "xray started via JNI.")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED)
-                    VpnCoreManager.activeVpnCoreManager?.startTracking()
-                }
+                
                 updateNotification("Connected to ${server.name}")
-
             } catch (e: Exception) {
-                repository.log("VPN", "ERROR", "JNI startup failed: ${e.localizedMessage}")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-                updateNotification("Connection failed")
+                Log.e("XRAY_CORE", "Error starting core: ${e.message}")
                 stopSelf()
             }
         }
     }
 
-    private fun stopVpn() {
-        try { coreController?.stopLoop(); coreController = null } catch (e: Exception) {
-            Log.e("VPN", "xray stop: ${e.localizedMessage}")
-        }
-        try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) {
-            Log.e("VPN", "TUN close: ${e.localizedMessage}")
-        }
-
-        CoroutineScope(Dispatchers.Main).launch {
-            VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.DISCONNECTED)
-            VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
-            VpnCoreManager.activeVpnCoreManager?.stopTracking()
-        }
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val db = V2RayDatabase.getDatabase(applicationContext)
-                V2RayRepository(db).log("VPN", "INFO", "VPN disconnected.")
-            } catch (e: Exception) {}
-        }
-        stopForeground(true)
-        stopSelf()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "V2Ray Dan", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
-    }
-
-    /**
-     * این تابع بررسی می‌کند که آیا فایل‌های دیتابیس در حافظه داخلی اپلیکیشن موجود هستند یا خیر.
-     * در صورت عدم وجود، آن‌ها را از بخش Assets کپی می‌کند تا هسته Xray بتواند قوانین را بخواند.
-     */
     private fun copyAssetFileIfNeeded(fileName: String) {
         val outFile = File(filesDir, fileName)
-        if (!outFile.exists()) {
+        // اگر فایل وجود ندارد یا حجم آن صفر است، کپی کن
+        if (!outFile.exists() || outFile.length() == 0L) {
             try {
                 assets.open(fileName).use { inputStream ->
                     outFile.outputStream().use { outputStream ->
                         inputStream.copyTo(outputStream)
                     }
                 }
-                Log.d("VPN_ASSETS", "$fileName copied to filesDir successfully.")
+                Log.d("VPN_ASSETS", "$fileName copied. Size: ${outFile.length()}")
             } catch (e: Exception) {
-                Log.e("VPN_ASSETS", "Error copying $fileName: ${e.message}")
+                Log.e("VPN_ASSETS", "Copy error: ${e.message}")
             }
         }
     }
 
+    private fun stopVpn() {
+        coreController?.stopLoop()
+        interfaceDescriptor?.close()
+        stopForeground(true)
+        stopSelf()
+    }
+
+    private fun buildNotification(text: String): android.app.Notification {
+        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("V2Ray Dan").setContentText(text).setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(pi).setOngoing(true).build()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+    }
+
     override fun onDestroy() {
-        try { coreController?.stopLoop(); coreController = null } catch (e: Exception) {}
-        try { interfaceDescriptor?.close(); interfaceDescriptor = null } catch (e: Exception) {}
         serviceJob.cancel()
         super.onDestroy()
     }
