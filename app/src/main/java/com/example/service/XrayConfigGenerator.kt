@@ -36,11 +36,36 @@ object XrayConfigGenerator {
             ""
         }
 
+        // 👈 بخش Routing اضافه شد برای دور زدن ترافیک داخلی و ایران
+        val routingRules = """
+          "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+              {
+                "type": "field",
+                "outboundTag": "direct",
+                "domain": [
+                  "geosite:ir"
+                ]
+              },
+              {
+                "type": "field",
+                "outboundTag": "direct",
+                "ip": [
+                  "geoip:private",
+                  "geoip:ir"
+                ]
+              }
+            ]
+          },
+        """.trimIndent()
+
         return """
         {
           "log": {
             "loglevel": "info"
           },
+          $routingRules
           "inbounds": [
             {
               "port": 10808,
@@ -198,10 +223,10 @@ object XrayConfigGenerator {
         val securityConfig = when {
             isReality -> {
                 // فیلدهای واقعی REALITY که الان از پارسر می‌آن:
-                //   server.sni          → serverName هدف (مثلاً "www.google.com")
-                //   server.publicKey    → publicKey سرور (پارامتر pbk)
-                //   server.shortId      → shortId (پارامتر sid)
-                //   server.fingerprint  → fingerprint مرورگر (پارامتر fp)
+                //   server.sni         → serverName هدف (مثلاً "www.google.com")
+                //   server.publicKey   → publicKey سرور (پارامتر pbk)
+                //   server.shortId     → shortId (پارامتر sid)
+                //   server.fingerprint → fingerprint مرورگر (پارامتر fp)
                 val sniToUse      = server.sni.ifEmpty { "www.google.com" }
                 val publicKey     = server.publicKey
                 val shortId       = server.shortId
