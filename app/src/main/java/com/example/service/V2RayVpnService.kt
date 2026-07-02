@@ -16,6 +16,7 @@ import kotlinx.coroutines.*
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
+import java.io.File
 
 class V2RayVpnService : VpnService() {
 
@@ -44,12 +45,6 @@ class V2RayVpnService : VpnService() {
     }
 
     // ── Notification helpers ───────────────────────────────────────────
-    //
-    // پیش‌تر متن نوتیفیکیشن فقط یک بار در startForeground() ساخته می‌شد
-    // و بعد از آن هیچ‌جا آپدیت نمی‌شد، در نتیجه همیشه روی "Connecting..."
-    // باقی می‌ماند حتی بعد از اتصال موفق. این دو متد، notification را
-    // واقعاً بر اساس وضعیت فعلی اتصال به‌روزرسانی می‌کنند.
-
     private fun buildNotification(contentText: String): android.app.Notification {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -129,15 +124,15 @@ class V2RayVpnService : VpnService() {
 
             // ── 3. xray via JNI با fd مستقیم ─────────────────────────────
             try {
+                // کپی کردن فایل‌های دیتابیس لوکال مسیریابی از Assets به حافظه دستگاه (در صورت نیاز)
+                copyAssetFileIfNeeded("geoip.dat")
+                copyAssetFileIfNeeded("geosite.dat")
+
                 // Init asset path برای geoip/geosite
                 Libv2ray.initCoreEnv(filesDir.absolutePath, "")
 
                 val callbackHandler = object : CoreCallbackHandler {
                     override fun onEmitStatus(p0: Long, p1: String?): Long {
-                        // این callback از هسته‌ی xray می‌آید و صرفاً برای لاگ/دیباگ
-                        // استفاده می‌شود؛ نباید مستقیماً وضعیت اتصال یا متن نوتیفیکیشن
-                        // را از اینجا تغییر دهد، چون معنای p0/p1 مستقل از موفقیت یا
-                        // شکست واقعی startLoop است.
                         Log.d("XRAY-JNI", "Status[$p0]: $p1")
                         return 0L
                     }
@@ -166,7 +161,6 @@ class V2RayVpnService : VpnService() {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED)
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
                 }
-                // نوتیفیکیشن را به وضعیت واقعی (متصل) آپدیت می‌کنیم
                 updateNotification("Connected to ${server.name}")
 
             } catch (e: Exception) {
@@ -208,6 +202,26 @@ class V2RayVpnService : VpnService() {
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "V2Ray Dan", NotificationManager.IMPORTANCE_LOW)
             )
+        }
+    }
+
+    /**
+     * این تابع بررسی می‌کند که آیا فایل‌های دیتابیس در حافظه داخلی اپلیکیشن موجود هستند یا خیر.
+     * در صورت عدم وجود، آن‌ها را از بخش Assets کپی می‌کند تا هسته Xray بتواند قوانین را بخواند.
+     */
+    private fun copyAssetFileIfNeeded(fileName: String) {
+        val outFile = File(filesDir, fileName)
+        if (!outFile.exists()) {
+            try {
+                assets.open(fileName).use { inputStream ->
+                    outFile.outputStream().use { outputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+                Log.d("VPN_ASSETS", "$fileName copied to filesDir successfully.")
+            } catch (e: Exception) {
+                Log.e("VPN_ASSETS", "Error copying $fileName: ${e.message}")
+            }
         }
     }
 
