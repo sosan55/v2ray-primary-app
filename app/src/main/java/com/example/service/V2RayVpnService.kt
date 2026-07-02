@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -30,23 +31,17 @@ class V2RayVpnService : VpnService() {
         const val ACTION_STOP  = "com.example.service.STOP"
         private const val CHANNEL_ID      = "v2ray_vpn_service_channel"
         private const val NOTIFICATION_ID = 1002
-        private const val TUN_ADDR        = "10.0.0.2"
-        private const val TUN_PREFIX      = 24
-        private const val TUN_MTU         = 1500
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) { stopSelf(); return START_NOT_STICKY }
-        when (intent.action) {
-            ACTION_START -> startVpn()
-            ACTION_STOP  -> stopVpn()
-        }
+        if (intent?.action == ACTION_START) startVpn()
+        else if (intent?.action == ACTION_STOP) stopVpn()
         return START_STICKY
     }
 
     private fun startVpn() {
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
+        startForeground(NOTIFICATION_ID, buildNotification("در حال اتصال..."))
 
         serviceScope.launch {
             val db = V2RayDatabase.getDatabase(applicationContext)
@@ -54,41 +49,25 @@ class V2RayVpnService : VpnService() {
             val server = repository.getSelectedServer()
 
             if (server == null) {
-                repository.log("VPN", "ERROR", "No server selected.")
                 stopSelf(); return@launch
             }
 
-            // ── 1. TUN interface ──────────────────────────────────────────
-            val fd: Int
             try {
-                val builder = Builder()
-                    .setSession("V2RayDan")
-                    .addAddress(TUN_ADDR, TUN_PREFIX)
-                    .addRoute("0.0.0.0", 0)
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("8.8.8.8")
-                    .setMtu(TUN_MTU)
-                try { builder.addDisallowedApplication(packageName) } catch (e: Exception) {}
-
-                interfaceDescriptor = builder.establish()
-                if (interfaceDescriptor == null) return@launch
-                fd = interfaceDescriptor!!.fd
-            } catch (e: Exception) {
-                stopSelf(); return@launch
-            }
-
-            // ── 2. Xray Initialization ──────────────────────────────────
-            try {
-                // کپی فایل‌های دیتابیس به مسیر فایل‌های اپلیکیشن
+                // 1. کپی فایل‌های دیتابیس (بسیار مهم)
                 copyAssetFileIfNeeded("geoip.dat")
                 copyAssetFileIfNeeded("geosite.dat")
 
-                // ست کردن مسیر محیطی هسته برای پیدا کردن دیتابیس‌ها
+                // 2. راه‌اندازی TUN
+                val builder = Builder().setSession("V2RayDan").addAddress("10.0.0.2", 24)
+                    .addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1").setMtu(1500)
+                
+                interfaceDescriptor = builder.establish()
+                val fd = interfaceDescriptor?.fd ?: return@launch
+
+                // 3. تنظیم محیط هسته
                 Libv2ray.initCoreEnv(filesDir.absolutePath, "")
-                Log.d("XRAY_CORE", "Core initialized at: ${filesDir.absolutePath}")
 
                 val configJson = XrayConfigGenerator.generate(server, fd)
-
                 val controller = Libv2ray.newCoreController(object : CoreCallbackHandler {
                     override fun onEmitStatus(p0: Long, p1: String?): Long = 0L
                     override fun shutdown(): Long = 0L
@@ -98,9 +77,9 @@ class V2RayVpnService : VpnService() {
                 coreController = controller
                 controller.startLoop(configJson, fd)
                 
-                updateNotification("Connected to ${server.name}")
+                updateNotification("متصل شد")
             } catch (e: Exception) {
-                Log.e("XRAY_CORE", "Error starting core: ${e.message}")
+                Log.e("VPN_ERROR", e.message ?: "Unknown error")
                 stopSelf()
             }
         }
@@ -108,18 +87,32 @@ class V2RayVpnService : VpnService() {
 
     private fun copyAssetFileIfNeeded(fileName: String) {
         val outFile = File(filesDir, fileName)
-        // اگر فایل وجود ندارد یا حجم آن صفر است، کپی کن
         if (!outFile.exists() || outFile.length() == 0L) {
             try {
-                assets.open(fileName).use { inputStream ->
-                    outFile.outputStream().use { outputStream ->
-                        inputStream.copyTo(outputStream)
-                    }
+                assets.open(fileName).use { input ->
+                    outFile.outputStream().use { output -> input.copyTo(output) }
                 }
-                Log.d("VPN_ASSETS", "$fileName copied. Size: ${outFile.length()}")
-            } catch (e: Exception) {
-                Log.e("VPN_ASSETS", "Copy error: ${e.message}")
-            }
+            } catch (e: Exception) { Log.e("ASSETS", "Error: ${e.message}") }
+        }
+    }
+
+    private fun updateNotification(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    private fun buildNotification(text: String): Notification {
+        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), 
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("V2Ray Dan").setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentIntent(pi).build()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(CHANNEL_ID, "VPN Service", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
 
@@ -128,21 +121,6 @@ class V2RayVpnService : VpnService() {
         interfaceDescriptor?.close()
         stopForeground(true)
         stopSelf()
-    }
-
-    private fun buildNotification(text: String): android.app.Notification {
-        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("V2Ray Dan").setContentText(text).setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pi).setOngoing(true).build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
     }
 
     override fun onDestroy() {
