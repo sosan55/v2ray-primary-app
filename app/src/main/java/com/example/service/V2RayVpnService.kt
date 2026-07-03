@@ -29,7 +29,7 @@ class V2RayVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.example.service.START"
         const val ACTION_STOP  = "com.example.service.STOP"
-        private const val CHANNEL_ID      = "v2ray_vpn_service_channel"
+        private const val CHANNEL_ID = "v2ray_vpn_service_channel"
         private const val NOTIFICATION_ID = 1002
     }
 
@@ -48,28 +48,29 @@ class V2RayVpnService : VpnService() {
             val repository = V2RayRepository(db)
             val server = repository.getSelectedServer()
 
-            if (server == null) {
-                stopSelf(); return@launch
-            }
+            if (server == null) { stopSelf(); return@launch }
 
             try {
-                // 1. کپی فایل‌های دیتابیس (بسیار مهم)
+                // کپی فایل‌های دیتابیس (بسیار حیاتی)
                 copyAssetFileIfNeeded("geoip.dat")
                 copyAssetFileIfNeeded("geosite.dat")
 
-                // 2. راه‌اندازی TUN
                 val builder = Builder().setSession("V2RayDan").addAddress("10.0.0.2", 24)
                     .addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1").setMtu(1500)
                 
                 interfaceDescriptor = builder.establish()
                 val fd = interfaceDescriptor?.fd ?: return@launch
 
-                // 3. تنظیم محیط هسته
+                // مقداردهی محیط هسته با مسیر مطلق
                 Libv2ray.initCoreEnv(filesDir.absolutePath, "")
 
                 val configJson = XrayConfigGenerator.generate(server, fd)
+                
                 val controller = Libv2ray.newCoreController(object : CoreCallbackHandler {
-                    override fun onEmitStatus(p0: Long, p1: String?): Long = 0L
+                    override fun onEmitStatus(p0: Long, p1: String?): Long {
+                        Log.d("XRAY_STATUS", "Status: $p1")
+                        return 0L
+                    }
                     override fun shutdown(): Long = 0L
                     override fun startup(): Long = 0L
                 })
@@ -79,7 +80,7 @@ class V2RayVpnService : VpnService() {
                 
                 updateNotification("متصل شد")
             } catch (e: Exception) {
-                Log.e("VPN_ERROR", e.message ?: "Unknown error")
+                Log.e("VPN_ERROR", "خطای اصلی: ${e.stackTraceToString()}")
                 stopSelf()
             }
         }
@@ -87,12 +88,13 @@ class V2RayVpnService : VpnService() {
 
     private fun copyAssetFileIfNeeded(fileName: String) {
         val outFile = File(filesDir, fileName)
-        if (!outFile.exists() || outFile.length() == 0L) {
+        if (!outFile.exists()) {
             try {
                 assets.open(fileName).use { input ->
                     outFile.outputStream().use { output -> input.copyTo(output) }
                 }
-            } catch (e: Exception) { Log.e("ASSETS", "Error: ${e.message}") }
+                Log.d("ASSETS", "$fileName کپی شد.")
+            } catch (e: Exception) { Log.e("ASSETS", "خطا در کپی: ${e.message}") }
         }
     }
 
@@ -111,7 +113,7 @@ class V2RayVpnService : VpnService() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "VPN Service", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
