@@ -96,6 +96,7 @@ android {
   packaging {
     jniLibs {
       useLegacyPackaging = true
+      keepDebugSymbols.add("**/libxray.so")
     }
   }
 }
