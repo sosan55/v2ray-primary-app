@@ -269,8 +269,8 @@ class V2RayVpnService : VpnService() {
         // This is the read-only directory managed by Package Manager where files can be executed.
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
         val nativeBinary = File(nativeLibDir, "libxray.so")
-        if (nativeBinary.exists() && nativeBinary.length() > 15_000_000) {
-            repository.log("SYSTEM", "SUCCESS", "Located standard executable library in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes)")
+        if (nativeBinary.exists() && nativeBinary.length() > 1_000_000) {
+            repository.log("SYSTEM", "SUCCESS", "Located standard executable library in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes). Running directly to satisfy Android 10+ execution policies.")
             return nativeBinary
         }
 
