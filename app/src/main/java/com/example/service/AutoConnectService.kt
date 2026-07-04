@@ -87,14 +87,12 @@ class AutoConnectService : Service() {
                             // If VPN is active, trigger dynamic reconnection
                             val vpnManager = VpnCoreManager.activeVpnCoreManager
                             if (vpnManager != null && vpnManager.vpnState.value == VpnState.CONNECTED) {
-                                repository.log("AUTO-SELECTOR", "INFO", "Active tunnel session detected. Skipping reconnect to avoid disruption.")
-                                // NOTE: auto-reconnect disabled to prevent repeated disconnections
-                                // If you want to re-enable, uncomment the lines below:
-                                // withContext(Dispatchers.Main) {
-                                //     vpnManager.stopVpn()
-                                //     delay(500)
-                                //     vpnManager.toggleVpn(lowestLatencyServer)
-                                // }
+                                repository.log("AUTO-SELECTOR", "INFO", "Active tunnel session detected. Dispatching connection handoff trigger.")
+                                withContext(Dispatchers.Main) {
+                                    vpnManager.stopVpn()
+                                    delay(500) // allow teardown
+                                    vpnManager.toggleVpn(lowestLatencyServer)
+                                }
                             }
                         } else if (lowestLatencyServer != null) {
                             repository.log(

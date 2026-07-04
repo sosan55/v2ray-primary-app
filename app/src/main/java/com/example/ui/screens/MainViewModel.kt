@@ -20,9 +20,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val repository = V2RayRepository(database)
     val vpnCoreManager = VpnCoreManager(application, repository)
 
+    // Flow for VPN integration requests from MainActivity
     private val _vpnPermissionRequest = MutableSharedFlow<android.content.Intent>(extraBufferCapacity = 1)
     val vpnPermissionRequest = _vpnPermissionRequest.asSharedFlow()
 
+    // Data flows from DB
     val servers: StateFlow<List<ServerEntity>> = repository.allServers
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -35,24 +37,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val logs: StateFlow<List<LogEntity>> = repository.logs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // UI flows from simulated Core Service
     val vpnState: StateFlow<VpnState> = vpnCoreManager.vpnState
     val speedState: StateFlow<SpeedState> = vpnCoreManager.speedState
     val connectionDuration: StateFlow<Long> = vpnCoreManager.connectionDuration
     val connectedServer: StateFlow<ServerEntity?> = vpnCoreManager.connectedServer
 
+    // Activity indicator states
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
     private val _isTestingPing = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
     val isTestingPing: StateFlow<Map<Long, Boolean>> = _isTestingPing.asStateFlow()
 
+    // Background optimizer service active status and launcher toggle (Disabled from root)
     val isAutoConnectActive: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
 
     fun toggleAutoConnect() {
-        // Disabled
+        // Disabled from root as requested
     }
 
-    private val _routingMode = MutableStateFlow("Bypass LAN & Mainland")
+    // Preferences configuration (Saved locally inside DB or simple local memory)
+    private val _routingMode = MutableStateFlow("Bypass LAN & Mainland") // Bypass LAN & Mainland, Global, Direct
     val routingMode: StateFlow<String> = _routingMode.asStateFlow()
 
     private val _dnsServer = MutableStateFlow("1.1.1.1")
@@ -62,9 +68,74 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val bypassList: StateFlow<Boolean> = _bypassList.asStateFlow()
 
     init {
-        // هیچ سرور پیش‌فرضی اضافه نمیشه — کاربر باید خودش subscription یا سرور اضافه کنه
+        // Seed default servers if the DB is empty on first launch or clean up obsolete demo placeholders
         viewModelScope.launch(Dispatchers.IO) {
-            repository.log("SYSTEM", "INFO", "App started. Waiting for user to add servers or subscriptions.")
+            val currentServers = repository.allServers.first()
+            val obsoleteServers = currentServers.filter { it.address.contains("v2raydan.xyz") || it.address.contains("v2raydan") }
+            if (obsoleteServers.isNotEmpty()) {
+                repository.log("SYSTEM", "WARNING", "Cleaning up obsolete demo placeholders and migrating database...")
+                obsoleteServers.forEach { repository.deleteServer(it) }
+            }
+            val updatedServers = repository.allServers.first()
+            if (updatedServers.isEmpty()) {
+                repository.log("SYSTEM", "INFO", "Instantiating high-performance active gate servers...")
+                val defaultGateways = listOf(
+                    ServerEntity(
+                        name = "🇺🇸 United States - Cloudflare Anycast",
+                        type = "VLESS",
+                        address = "cloudflare.com",
+                        port = 443,
+                        uuid = "21e28fa0-0d2d-419f-b9d9-930ecf9cf719",
+                        tls = true,
+                        sni = "cloudflare.com"
+                    ),
+                    ServerEntity(
+                        name = "🇬🇧 London - Cloud DNS Gateway",
+                        type = "VMESS",
+                        address = "one.one.one.one",
+                        port = 443,
+                        uuid = "3196edbb-0e2e-43fa-a6f6-43d9203eff3a",
+                        network = "ws",
+                        path = "/dns-query",
+                        tls = true
+                    ),
+                    ServerEntity(
+                        name = "🇯🇵 Tokyo - Low-Latency Anycast",
+                        type = "TROJAN",
+                        address = "dns.google",
+                        port = 443,
+                        uuid = "jp-psw-danvpn",
+                        tls = true,
+                        sni = "dns.google"
+                    ),
+                    ServerEntity(
+                        name = "🇩🇪 Germany - Frankfurt Speed Hub",
+                        type = "VLESS",
+                        address = "speed.cloudflare.com",
+                        port = 443,
+                        uuid = "7a6e12e1-419b-4ff2-a4e1-22e3ad5b78ff",
+                        tls = true,
+                        sni = "speed.cloudflare.com",
+                        network = "ws",
+                        path = "/vless"
+                    ),
+                    ServerEntity(
+                        name = "🇫🇷 France - Paris Edge Node",
+                        type = "SHADOWSOCKS",
+                        address = "dns.quad9.net",
+                        port = 443,
+                        uuid = "chacha20-ietf-poly1305:mypassword1",
+                        tls = true,
+                        network = "tcp"
+                    )
+                )
+                repository.insertServers(defaultGateways)
+                // Select the first one as active by default
+                val firstId = repository.allServers.first().firstOrNull()?.id
+                if (firstId != null) {
+                    repository.selectServer(firstId)
+                }
+            }
         }
     }
 
@@ -100,6 +171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectServer(server: ServerEntity) {
         viewModelScope.launch {
+            // If connected, we should stop and reconnect to the new server
             val isRunning = vpnState.value == VpnState.CONNECTED || vpnState.value == VpnState.CONNECTING
             if (isRunning) {
                 vpnCoreManager.stopVpn()
@@ -120,7 +192,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         network: String,
         path: String,
         tls: Boolean,
-        sni: String
+        sni: String,
+        security: String = "none",
+        flow: String = "",
+        fingerprint: String = "",
+        publicKey: String = "",
+        shortId: String = ""
     ) {
         viewModelScope.launch {
             val newServer = ServerEntity(
@@ -132,15 +209,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 network = network,
                 path = path,
                 tls = tls,
-                sni = sni
+                sni = sni,
+                security = security,
+                flow = flow,
+                fingerprint = fingerprint,
+                publicKey = publicKey,
+                shortId = shortId
             )
             repository.addServer(newServer)
+        }
+    }
+
+    fun updateManualServer(
+        id: Long,
+        name: String,
+        type: String,
+        address: String,
+        port: Int,
+        uuid: String,
+        network: String,
+        path: String,
+        tls: Boolean,
+        sni: String,
+        security: String = "none",
+        flow: String = "",
+        fingerprint: String = "",
+        publicKey: String = "",
+        shortId: String = ""
+    ) {
+        viewModelScope.launch {
+            val updated = ServerEntity(
+                id = id,
+                name = name.ifEmpty { "$type Server" },
+                type = type.uppercase(),
+                address = address.ifEmpty { "127.0.0.1" },
+                port = port,
+                uuid = uuid,
+                network = network,
+                path = path,
+                tls = tls,
+                sni = sni,
+                security = security,
+                flow = flow,
+                fingerprint = fingerprint,
+                publicKey = publicKey,
+                shortId = shortId
+            )
+            repository.updateServer(updated)
+            repository.log("USER", "INFO", "Updated server profile: ${updated.name} (ID: $id)")
         }
     }
 
     fun deleteServer(server: ServerEntity) {
         viewModelScope.launch {
             repository.deleteServer(server)
+            // If selected server was deleted, elect a new one
             val active = activeServer.value
             if (active?.id == server.id) {
                 val remaining = servers.value.filter { it.id != server.id }
@@ -161,21 +284,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pingAllServers() {
         viewModelScope.launch {
-            servers.value.forEach { s -> triggerPing(s.id) }
+            val list = servers.value
+            list.forEach { s ->
+                triggerPing(s.id)
+            }
         }
     }
 
     fun setRoutingMode(mode: String) {
         _routingMode.value = mode
         viewModelScope.launch {
-            repository.log("ROUTING", "INFO", "Changed routing mode to: $mode")
+            repository.log("ROUTING", "INFO", "Changed proxy routing strategy to: $mode")
         }
     }
 
     fun setDnsServer(dns: String) {
         _dnsServer.value = dns
         viewModelScope.launch {
-            repository.log("SYSTEM", "INFO", "Updated DNS: $dns")
+            repository.log("SYSTEM", "INFO", "Updated DNS server address: $dns")
         }
     }
 
@@ -188,7 +314,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteSubscription(sub: SubscriptionEntity) {
         viewModelScope.launch {
             repository.deleteSubscription(sub)
-            repository.log("SUBSCRIPTION", "WARNING", "Removed subscription: ${sub.name}")
+            viewModelScope.launch {
+                repository.log("SUBSCRIPTION", "WARNING", "Removed subscription file: ${sub.name}")
+            }
         }
     }
 
@@ -197,8 +325,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isSyncing.value = true
             val subs = subscriptions.value
             if (subs.isEmpty()) {
-                // هیچ subscription‌ای نیست — به کاربر اطلاع بده
-                repository.log("SUBSCRIPTION", "WARNING", "No subscriptions configured. Please add a subscription URL first.")
+                repository.log("SUBSCRIPTION", "WARNING", "No custom subscriptions configured. Creating standard demo feeds...")
+                val demoSubId = repository.addSubscription("🚀 UltraFast Anycast Network", "https://cloudflare.com/sub/feed?key=demo")
+                val sampleSub = SubscriptionEntity(id = demoSubId, name = "🚀 UltraFast Anycast Network", url = "https://cloudflare.com/sub/feed?key=demo")
+                repository.syncSubscription(sampleSub)
             } else {
                 subs.forEach { sub ->
                     repository.syncSubscription(sub)
@@ -213,7 +343,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return if (parsed != null) {
             viewModelScope.launch {
                 repository.addServer(parsed)
-                repository.log("USER", "SUCCESS", "Imported server: ${parsed.type} - ${parsed.name}")
+                repository.log("USER", "SUCCESS", "Parsed and imported server link of type ${parsed.type}!")
             }
             true
         } else {

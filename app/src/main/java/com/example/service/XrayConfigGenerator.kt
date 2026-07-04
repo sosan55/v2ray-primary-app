@@ -1,10 +1,11 @@
 package com.example.service
 
 import com.example.data.ServerEntity
+import java.io.File
 
 object XrayConfigGenerator {
 
-    fun generate(server: ServerEntity, fd: Int = -1): String {
+    fun generate(server: ServerEntity, fd: Int = -1, filesDir: File? = null): String {
         val outbounds = when (server.type.uppercase()) {
             "VLESS" -> generateVlessOutbound(server)
             "VMESS" -> generateVmessOutbound(server)
@@ -16,11 +17,15 @@ object XrayConfigGenerator {
         val tunInboundOpt = if (fd != -1) {
             """,
             {
-              "port": 0,
               "protocol": "tun",
+              "port": 0,
               "settings": {
-                "name": "xray0",
-                "MTU": 1500,
+                "stack": "gvisor",
+                "name": "tun0",
+                "mtu": 1400,
+                "fileDescriptor": $fd,
+                "file_descriptor": $fd,
+                "fd": $fd,
                 "sniffing": {
                   "enabled": true,
                   "destOverride": ["http", "tls", "quic"]
@@ -31,7 +36,9 @@ object XrayConfigGenerator {
             ""
         }
 
-        // تغییر استراتژی به IPIfNonMatch برای جلوگیری از کرش در صورت عدم بارگذاری صحیح دیتابیس
+        // Safety verification: only append geoip/geosite strings if files actually exist on filesystem to prevent core crash
+        val hasGeodata = filesDir != null && File(filesDir, "geoip.dat").exists() && File(filesDir, "geosite.dat").exists()
+
         val routingRules = """
           "routing": {
             "domainStrategy": "IPIfNonMatch",
@@ -39,12 +46,25 @@ object XrayConfigGenerator {
               {
                 "type": "field",
                 "outboundTag": "direct",
-                "domain": ["geosite:ir"]
+                "domain": [
+                  "regexp:\\.ir$",
+                  "regexp:^[^.]*\\.ir$"
+                  ${if (hasGeodata) ",\"geosite:ir\"" else ""}
+                ]
               },
               {
                 "type": "field",
                 "outboundTag": "direct",
-                "ip": ["geoip:private", "geoip:ir"]
+                "ip": [
+                  "10.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "127.0.0.0/8",
+                  "100.64.0.0/10",
+                  "fc00::/7",
+                  "fe80::/10"
+                  ${if (hasGeodata) ",\"geoip:private\",\"geoip:ir\"" else ""}
+                ]
               }
             ]
           },
@@ -53,7 +73,7 @@ object XrayConfigGenerator {
         return """
         {
           "log": {
-            "loglevel": "info"
+            "loglevel": "warning"
           },
           $routingRules
           "inbounds": [
@@ -95,21 +115,25 @@ object XrayConfigGenerator {
         {
           "protocol": "vless",
           "settings": {
-            "vnext": [{
-              "address": "${server.address}",
-              "port": ${server.port},
-              "users": [{
-                "id": "${server.uuid}",
-                "encryption": "none",
-                "flow": "$flowValue",
-                "level": 0
-              }]
-            }]
+            "vnext": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "users": [
+                  {
+                    "id": "${server.uuid}",
+                    "encryption": "none",
+                    "flow": "$flowValue",
+                    "level": 0
+                  }
+                ]
+              }
+            ]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateVmessOutbound(server: ServerEntity): String {
@@ -118,21 +142,25 @@ object XrayConfigGenerator {
         {
           "protocol": "vmess",
           "settings": {
-            "vnext": [{
-              "address": "${server.address}",
-              "port": ${server.port},
-              "users": [{
-                "id": "${server.uuid}",
-                "alterId": ${server.alterId},
-                "security": "${server.security.ifEmpty { "auto" }}",
-                "level": 0
-              }]
-            }]
+            "vnext": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "users": [
+                  {
+                    "id": "${server.uuid}",
+                    "alterId": ${server.alterId},
+                    "security": "${server.security.ifEmpty { "auto" }}",
+                    "level": 0
+                  }
+                ]
+              }
+            ]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateTrojanOutbound(server: ServerEntity): String {
@@ -141,17 +169,19 @@ object XrayConfigGenerator {
         {
           "protocol": "trojan",
           "settings": {
-            "servers": [{
-              "address": "${server.address}",
-              "port": ${server.port},
-              "password": "${server.uuid}",
-              "level": 0
-            }]
+            "servers": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "password": "${server.uuid}",
+                "level": 0
+              }
+            ]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
     private fun generateShadowsocksOutbound(server: ServerEntity): String {
@@ -164,21 +194,31 @@ object XrayConfigGenerator {
         {
           "protocol": "shadowsocks",
           "settings": {
-            "servers": [{
-              "address": "${server.address}",
-              "port": ${server.port},
-              "method": "$method",
-              "password": "$password",
-              "level": 0
-            }]
+            "servers": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "method": "$method",
+                "password": "$password",
+                "level": 0
+              }
+            ]
           },
           "streamSettings": $streamSettingsJson,
           "tag": "proxy"
         }
-        """.trimIndent()
+        """
     }
 
-    private fun generateFreedomOutbound(): String = """{"protocol": "freedom", "settings": {}, "tag": "proxy"}"""
+    private fun generateFreedomOutbound(): String {
+        return """
+        {
+          "protocol": "freedom",
+          "settings": {},
+          "tag": "proxy"
+        }
+        """
+    }
 
     private fun generateStreamSettings(server: ServerEntity): String {
         val isReality = server.security.lowercase() == "reality"
@@ -189,20 +229,29 @@ object XrayConfigGenerator {
         }
 
         val securityConfig = when {
-            isReality -> """
-            "realitySettings": {
-              "show": false,
-              "fingerprint": "${server.fingerprint.ifEmpty { "chrome" }}",
-              "serverName": "${server.sni.ifEmpty { "www.google.com" }}",
-              "publicKey": "${server.publicKey}",
-              "shortId": "${server.shortId}",
-              "spiderX": "/"
-            }""".trimIndent()
-            server.tls -> """
-            "tlsSettings": {
-              "serverName": "${server.sni.ifEmpty { server.address }}",
-              "allowInsecure": true
-            }""".trimIndent()
+            isReality -> {
+                val sniToUse = server.sni.ifEmpty { "www.google.com" }
+                val fingerprintToUse = server.fingerprint.ifEmpty { "chrome" }
+                """
+                "realitySettings": {
+                  "show": false,
+                  "fingerprint": "$fingerprintToUse",
+                  "serverName": "$sniToUse",
+                  "publicKey": "${server.publicKey}",
+                  "shortId": "${server.shortId}",
+                  "spiderX": "/"
+                }
+                """
+            }
+            server.tls -> {
+                val sniToUse = server.sni.ifEmpty { server.address }
+                """
+                "tlsSettings": {
+                  "serverName": "$sniToUse",
+                  "allowInsecure": true
+                }
+                """
+            }
             else -> ""
         }
 
@@ -210,10 +259,16 @@ object XrayConfigGenerator {
             "ws" -> """
             "wsSettings": {
               "path": "${server.path.ifEmpty { "/" }}",
-              "headers": { "Host": "${server.host.ifEmpty { server.address }}" }
-            }""".trimIndent()
+              "headers": {
+                "Host": "${server.host.ifEmpty { server.address }}"
+              }
+            }
+            """
             "grpc" -> """
-            "grpcSettings": { "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}" }""".trimIndent()
+            "grpcSettings": {
+              "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}"
+            }
+            """
             else -> ""
         }
 
@@ -228,6 +283,6 @@ object XrayConfigGenerator {
           ${if (parts.isNotEmpty()) "," else ""}
           ${parts.joinToString(",")}
         }
-        """.trimIndent()
+        """
     }
 }

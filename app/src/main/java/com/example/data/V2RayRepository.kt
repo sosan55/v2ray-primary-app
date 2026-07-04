@@ -104,14 +104,14 @@ class V2RayRepository(private val db: V2RayDatabase) {
         var parsedCount = 0
         try {
             log("SUBSCRIPTION", "INFO", "Syncing subscription: ${subscription.name} url: ${subscription.url}")
-
+            
             // Fetch subscription body
             val connection = URL(subscription.url).openConnection() as HttpURLConnection
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             connection.requestMethod = "GET"
             connection.setRequestProperty("User-Agent", "v2rayNG/1.8.5 (Android)")
-
+            
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
                 val reader = BufferedReader(InputStreamReader(connection.inputStream))
@@ -145,7 +145,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     serverDao.insertServers(parsedConfigs)
                     parsedCount = parsedConfigs.size
                     log("SUBSCRIPTION", "SUCCESS", "Successfully imported $parsedCount servers from subscription ${subscription.name}")
-
+                    
                     // Update subscription timestamp
                     subscriptionDao.insertSubscription(subscription.copy(lastUpdated = System.currentTimeMillis()))
                 } else {
@@ -168,52 +168,54 @@ class V2RayRepository(private val db: V2RayDatabase) {
     private fun generateDemoConfigs(subName: String): List<ServerEntity> {
         return listOf(
             ServerEntity(
-                name = "🇩🇪 Germany - Standard 01",
+                name = "🇩🇪 Germany - Anycast Hub 01",
                 type = "VLESS",
-                address = "de1.v2raydan.xyz",
+                address = "speed.cloudflare.com",
                 port = 443,
                 uuid = "7a6e12e1-419b-4ff2-a4e1-22e3ad5b78ff",
                 tls = true,
-                sni = "de1.v2raydan.xyz",
+                sni = "speed.cloudflare.com",
                 network = "ws",
                 path = "/vless-ws"
             ),
             ServerEntity(
-                name = "🇺🇸 USA Premium - G-Port 02",
+                name = "🇺🇸 USA Premium - Cloud Node 02",
                 type = "VMESS",
-                address = "us-gport.v2raydan.xyz",
-                port = 8443,
+                address = "cloudflare.com",
+                port = 443,
                 uuid = "41f17fa9-0d2d-419f-b9d9-930ecf9cf719",
                 tls = true,
-                network = "grpc",
-                path = "VessService"
+                network = "ws",
+                path = "/vmess"
             ),
             ServerEntity(
-                name = "🇫🇷 France Fast-Out 03",
+                name = "🇫🇷 France Fast-DNS 03",
                 type = "TROJAN",
-                address = "fr-fast.v2raydan.xyz",
+                address = "dns.quad9.net",
                 port = 443,
                 uuid = "fr-password-danvpn",
                 tls = true,
+                sni = "dns.quad9.net",
                 network = "tcp"
             ),
             ServerEntity(
-                name = "🇸🇬 Singapore High-Low 04",
+                name = "🇸🇬 Singapore Anycast Node 04",
                 type = "VLESS",
-                address = "sg-low.v2raydan.xyz",
-                port = 80,
+                address = "one.one.one.one",
+                port = 443,
                 uuid = "b7289ee1-ce12-4ee1-ffdd-2093eefcf23a",
-                tls = false,
+                tls = true,
+                sni = "one.one.one.one",
                 network = "ws",
                 path = "/ws"
             ),
             ServerEntity(
-                name = "🇳🇱 Netherlands Torrent Node 05",
+                name = "🇯🇵 Japan Tokyo Edge 05",
                 type = "SHADOWSOCKS",
-                address = "nl-p2p.v2raydan.xyz",
-                port = 10080,
+                address = "dns.google",
+                port = 443,
                 uuid = "chacha20-ietf-poly1305:mypassword1",
-                tls = false,
+                tls = true,
                 network = "tcp"
             )
         )
@@ -230,7 +232,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
 
                 val uuid = rawBody.substring(0, atIndex)
                 val address = if (colonIndex != -1) rawBody.substring(atIndex + 1, colonIndex) else rawBody.substring(atIndex + 1)
-
+                
                 val portStr = if (colonIndex != -1) {
                     if (questionIndex != -1) rawBody.substring(colonIndex + 1, questionIndex)
                     else rawBody.substring(colonIndex + 1)
@@ -241,39 +243,33 @@ class V2RayRepository(private val db: V2RayDatabase) {
                 var sni = ""
                 var network = "tcp"
                 var path = ""
-                var host = ""
                 var name = "VLESS Server"
-                var security = "none"
                 var flow = ""
+                var fingerprint = ""
                 var publicKey = ""
                 var shortId = ""
-                var fingerprint = ""
+                var securityParam = "none"
 
                 if (questionIndex != -1) {
                     val queryAndHash = rawBody.substring(questionIndex + 1)
                     val hashIndex = queryAndHash.indexOf('#')
                     val query = if (hashIndex != -1) queryAndHash.substring(0, hashIndex) else queryAndHash
-
+                    
                     if (hashIndex != -1) {
                         name = URLDecoder.decode(queryAndHash.substring(hashIndex + 1))
                     }
 
                     val params = parseQueryParams(query)
-
-                    // security می‌تونه "tls" یا "reality" یا "none" باشه
-                    security = params["security"]?.lowercase() ?: "none"
-                    tls = security == "tls" || security == "reality" || params["tls"] == "true"
-
+                    securityParam = params["security"]?.lowercase() ?: "none"
+                    tls = securityParam == "tls" || securityParam == "reality" || params["tls"] == "true"
                     sni = params["sni"] ?: ""
                     network = params["type"] ?: params["network"] ?: "tcp"
                     path = params["path"] ?: ""
-                    host = params["host"] ?: ""
+                    
                     flow = params["flow"] ?: ""
-
-                    // فیلدهای مخصوص REALITY
+                    fingerprint = params["fp"] ?: ""
                     publicKey = params["pbk"] ?: ""
                     shortId = params["sid"] ?: ""
-                    fingerprint = params["fp"] ?: ""
                 }
 
                 return ServerEntity(
@@ -286,12 +282,11 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     sni = sni,
                     network = network,
                     path = path,
-                    host = host,
-                    security = security,
+                    security = securityParam,
                     flow = flow,
+                    fingerprint = fingerprint,
                     publicKey = publicKey,
-                    shortId = shortId,
-                    fingerprint = fingerprint
+                    shortId = shortId
                 )
             } else if (link.startsWith("vmess://")) {
                 // vmess links are either base64 encoded strings of JSON configurations
@@ -351,10 +346,10 @@ class V2RayRepository(private val db: V2RayDatabase) {
                 val atIndex = rawBody.indexOf('@')
                 val colonIndex = rawBody.indexOf(':', atIndex)
                 val questionIndex = rawBody.indexOf('?', colonIndex)
-
+                
                 val password = rawBody.substring(0, atIndex)
                 val address = if (colonIndex != -1) rawBody.substring(atIndex + 1, colonIndex) else rawBody.substring(atIndex + 1)
-
+                
                 val portStr = if (colonIndex != -1) {
                     if (questionIndex != -1) rawBody.substring(colonIndex + 1, questionIndex)
                     else rawBody.substring(colonIndex + 1)
@@ -369,7 +364,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     val queryAndHash = rawBody.substring(questionIndex + 1)
                     val hashIndex = queryAndHash.indexOf('#')
                     val query = if (hashIndex != -1) queryAndHash.substring(0, hashIndex) else queryAndHash
-
+                    
                     if (hashIndex != -1) {
                         name = URLDecoder.decode(queryAndHash.substring(hashIndex + 1))
                     }

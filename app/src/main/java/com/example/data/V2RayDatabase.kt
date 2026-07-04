@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [ServerEntity::class, SubscriptionEntity::class, LogEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class V2RayDatabase : RoomDatabase() {

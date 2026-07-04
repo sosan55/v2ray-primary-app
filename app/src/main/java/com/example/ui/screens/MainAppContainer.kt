@@ -17,7 +17,7 @@ import com.example.ui.theme.*
 
 enum class AppTab(val title: String, val icon: ImageVector, val testTag: String) {
     HOME("Home", Icons.Default.Home, "tab_home"),
-    SERVERS("Nodes", Icons.Default.Dns, "tab_servers"),
+    SERVERS("Profiles", Icons.Default.Dns, "tab_servers"),
     LOGS("Terminal", Icons.Default.Terminal, "tab_logs"),
     SETTINGS("Settings", Icons.Default.Settings, "tab_settings")
 }
@@ -86,7 +86,7 @@ fun MainAppContainer(
                     viewModel = viewModel,
                     onNavigateToServers = { selectedTab = AppTab.SERVERS }
                 )
-                AppTab.SERVERS -> ServersScreen(
+                AppTab.SERVERS -> ProfileManager(
                     viewModel = viewModel
                 )
                 AppTab.LOGS -> LogsScreen(
