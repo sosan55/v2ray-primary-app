@@ -1,143 +1,288 @@
 package com.example.service
 
 import com.example.data.ServerEntity
+import java.io.File
 
 object XrayConfigGenerator {
 
-    fun generate(server: ServerEntity, fd: Int = -1): String {
+    fun generate(server: ServerEntity, fd: Int = -1, filesDir: File? = null): String {
         val outbounds = when (server.type.uppercase()) {
-            "VLESS"       -> generateVlessOutbound(server)
-            "VMESS"       -> generateVmessOutbound(server)
-            "TROJAN"      -> generateTrojanOutbound(server)
+            "VLESS" -> generateVlessOutbound(server)
+            "VMESS" -> generateVmessOutbound(server)
+            "TROJAN" -> generateTrojanOutbound(server)
             "SHADOWSOCKS" -> generateShadowsocksOutbound(server)
-            else          -> generateFreedomOutbound()
+            else -> generateFreedomOutbound()
         }
 
-        val tunInbound = if (fd != -1) {
-            """
+        val tunInboundOpt = if (fd != -1) {
+            """,
             {
               "protocol": "tun",
+              "port": 0,
               "settings": {
+                "stack": "gvisor",
                 "name": "tun0",
-                "mtu": 1500,
-                "gateway": ["10.0.0.1/24"]
+                "mtu": 1400,
+                "fileDescriptor": $fd,
+                "file_descriptor": $fd,
+                "fd": $fd,
+                "sniffing": {
+                  "enabled": true,
+                  "destOverride": ["http", "tls", "quic"]
+                }
               }
             }"""
-        } else ""
+        } else {
+            ""
+        }
 
-        val inboundsSeparator = if (fd != -1) "," else ""
+        // Safety verification: only append geoip/geosite strings if files actually exist on filesystem to prevent core crash
+        val hasGeodata = filesDir != null && File(filesDir, "geoip.dat").exists() && File(filesDir, "geosite.dat").exists()
 
-        // کد اصلاح شده مسیریابی که خطا نمی‌دهد
-        val routing = """
+        val routingRules = """
+          "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+              {
+                "type": "field",
+                "outboundTag": "direct",
+                "domain": [
+                  "regexp:\\.ir$",
+                  "regexp:^[^.]*\\.ir$"
+                  ${if (hasGeodata) ",\"geosite:ir\"" else ""}
+                ]
+              },
+              {
+                "type": "field",
+                "outboundTag": "direct",
+                "ip": [
+                  "10.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "127.0.0.0/8",
+                  "100.64.0.0/10",
+                  "fc00::/7",
+                  "fe80::/10"
+                  ${if (hasGeodata) ",\"geoip:private\",\"geoip:ir\"" else ""}
+                ]
+              }
+            ]
+          },
+        """.trimIndent()
+
+        return """
         {
-          "domainStrategy": "IPIfNonMatch",
-          "rules": [
+          "log": {
+            "loglevel": "warning"
+          },
+          $routingRules
+          "inbounds": [
             {
-              "type": "field",
-              "ip": [
-                "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "192.168.0.0/16"
-              ],
-              "outboundTag": "direct"
+              "port": 10808,
+              "listen": "127.0.0.1",
+              "protocol": "socks",
+              "settings": {
+                "auth": "noauth",
+                "udp": true
+              }
+            },
+            {
+              "port": 10809,
+              "listen": "127.0.0.1",
+              "protocol": "http",
+              "settings": {}
+            }
+            $tunInboundOpt
+          ],
+          "outbounds": [
+            $outbounds,
+            {
+              "protocol": "freedom",
+              "settings": {},
+              "tag": "direct"
             }
           ]
         }
         """.trimIndent()
-
-        return """
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "port": 10808, "listen": "127.0.0.1", "protocol": "socks",
-      "settings": { "auth": "noauth", "udp": true }
-    },
-    {
-      "port": 10809, "listen": "127.0.0.1", "protocol": "http", "settings": {}
-    }$inboundsSeparator
-    $tunInbound
-  ],
-  "outbounds": [
-    $outbounds,
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ],
-  "routing": $routing
-}
-        """.trimIndent()
     }
 
-    // متدهای تولید کانفیگ (Vless, Vmess, و غیره) دست‌نخورده باقی ماندند
     private fun generateVlessOutbound(server: ServerEntity): String {
-        val streamSettings = generateStreamSettings(server)
+        val streamSettingsJson = generateStreamSettings(server)
+        val flowValue = server.flow.ifEmpty {
+            if (server.security.lowercase() == "reality") "xtls-rprx-vision" else ""
+        }
         return """
         {
           "protocol": "vless",
           "settings": {
-            "vnext": [{ "address": "${server.address}", "port": ${server.port}, "users": [{ "id": "${server.uuid}", "encryption": "none", "level": 0 }] }]
+            "vnext": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "users": [
+                  {
+                    "id": "${server.uuid}",
+                    "encryption": "none",
+                    "flow": "$flowValue",
+                    "level": 0
+                  }
+                ]
+              }
+            ]
           },
-          "streamSettings": $streamSettings,
+          "streamSettings": $streamSettingsJson,
           "tag": "proxy"
-        }""".trimIndent()
+        }
+        """
     }
 
     private fun generateVmessOutbound(server: ServerEntity): String {
-        val streamSettings = generateStreamSettings(server)
+        val streamSettingsJson = generateStreamSettings(server)
         return """
         {
           "protocol": "vmess",
           "settings": {
-            "vnext": [{ "address": "${server.address}", "port": ${server.port}, "users": [{ "id": "${server.uuid}", "alterId": ${server.alterId}, "security": "${server.security.ifEmpty { "auto" }}", "level": 0 }] }]
+            "vnext": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "users": [
+                  {
+                    "id": "${server.uuid}",
+                    "alterId": ${server.alterId},
+                    "security": "${server.security.ifEmpty { "auto" }}",
+                    "level": 0
+                  }
+                ]
+              }
+            ]
           },
-          "streamSettings": $streamSettings,
+          "streamSettings": $streamSettingsJson,
           "tag": "proxy"
-        }""".trimIndent()
+        }
+        """
     }
 
     private fun generateTrojanOutbound(server: ServerEntity): String {
-        val streamSettings = generateStreamSettings(server)
+        val streamSettingsJson = generateStreamSettings(server)
         return """
         {
           "protocol": "trojan",
           "settings": {
-            "servers": [{ "address": "${server.address}", "port": ${server.port}, "password": "${server.uuid}", "level": 0 }]
+            "servers": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "password": "${server.uuid}",
+                "level": 0
+              }
+            ]
           },
-          "streamSettings": $streamSettings,
+          "streamSettings": $streamSettingsJson,
           "tag": "proxy"
-        }""".trimIndent()
+        }
+        """
     }
 
     private fun generateShadowsocksOutbound(server: ServerEntity): String {
         val creds = server.uuid.split(":")
         val method = if (creds.isNotEmpty()) creds[0] else "aes-256-gcm"
-        val password = if (creds.size > 1) creds[1] else ""
-        val streamSettings = generateStreamSettings(server)
+        val password = if (creds.size > 1) creds[1] else "mypassword"
+        val streamSettingsJson = generateStreamSettings(server)
+
         return """
         {
           "protocol": "shadowsocks",
           "settings": {
-            "servers": [{ "address": "${server.address}", "port": ${server.port}, "method": "$method", "password": "$password", "level": 0 }]
+            "servers": [
+              {
+                "address": "${server.address}",
+                "port": ${server.port},
+                "method": "$method",
+                "password": "$password",
+                "level": 0
+              }
+            ]
           },
-          "streamSettings": $streamSettings,
+          "streamSettings": $streamSettingsJson,
           "tag": "proxy"
-        }""".trimIndent()
+        }
+        """
     }
 
     private fun generateFreedomOutbound(): String {
-        return """{ "protocol": "freedom", "tag": "proxy" }""".trimIndent()
+        return """
+        {
+          "protocol": "freedom",
+          "settings": {},
+          "tag": "proxy"
+        }
+        """
     }
 
     private fun generateStreamSettings(server: ServerEntity): String {
-        val security = if (server.tls) "tls" else "none"
+        val isReality = server.security.lowercase() == "reality"
+        val securityStr = when {
+            isReality -> "reality"
+            server.tls -> "tls"
+            else -> "none"
+        }
+
+        val securityConfig = when {
+            isReality -> {
+                val sniToUse = server.sni.ifEmpty { "www.google.com" }
+                val fingerprintToUse = server.fingerprint.ifEmpty { "chrome" }
+                """
+                "realitySettings": {
+                  "show": false,
+                  "fingerprint": "$fingerprintToUse",
+                  "serverName": "$sniToUse",
+                  "publicKey": "${server.publicKey}",
+                  "shortId": "${server.shortId}",
+                  "spiderX": "/"
+                }
+                """
+            }
+            server.tls -> {
+                val sniToUse = server.sni.ifEmpty { server.address }
+                """
+                "tlsSettings": {
+                  "serverName": "$sniToUse",
+                  "allowInsecure": true
+                }
+                """
+            }
+            else -> ""
+        }
+
+        val transportConfig = when (server.network.lowercase()) {
+            "ws" -> """
+            "wsSettings": {
+              "path": "${server.path.ifEmpty { "/" }}",
+              "headers": {
+                "Host": "${server.host.ifEmpty { server.address }}"
+              }
+            }
+            """
+            "grpc" -> """
+            "grpcSettings": {
+              "serviceName": "${server.path.ifEmpty { "v2ray-grpc" }}"
+            }
+            """
+            else -> ""
+        }
+
         val parts = mutableListOf<String>()
-        if (server.tls) {
-            val sni = server.sni.ifEmpty { server.address }
-            parts.add("\"tlsSettings\": { \"serverName\": \"$sni\", \"allowInsecure\": false }")
+        if (securityConfig.isNotEmpty()) parts.add(securityConfig)
+        if (transportConfig.isNotEmpty()) parts.add(transportConfig)
+
+        return """
+        {
+          "network": "${server.network.lowercase().ifEmpty { "tcp" }}",
+          "security": "$securityStr"
+          ${if (parts.isNotEmpty()) "," else ""}
+          ${parts.joinToString(",")}
         }
-        when (server.network.lowercase()) {
-            "ws" -> parts.add("\"wsSettings\": { \"path\": \"${server.path.ifEmpty { "/" }}\", \"headers\": { \"Host\": \"${server.host.ifEmpty { server.address }}\" } }")
-            "grpc" -> parts.add("\"grpcSettings\": { \"serviceName\": \"${server.path.ifEmpty { "grpc" }}\" }")
-        }
-        val extra = if (parts.isNotEmpty()) ",\n" + parts.joinToString(",\n") else ""
-        return """{ "network": "${server.network.lowercase().ifEmpty { "tcp" }}", "security": "$security"$extra }""".trimIndent()
+        """
     }
 }
