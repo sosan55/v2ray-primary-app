@@ -166,37 +166,50 @@ dependencies {
 
 tasks.register("downloadXrayCore") {
     group = "build setup"
-    description = "Downloads Xray core arm64 binary and places it in jniLibs"
+    description = "Downloads Xray core and assets, placing them in jniLibs and assets"
 
     val xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
-    val outputDir = file("src/main/jniLibs/arm64-v8a")
     val jniLibFile = file("src/main/jniLibs/arm64-v8a/libxray.so")
+    val geoipFile = file("src/main/assets/geoip.dat")
+    val geositeFile = file("src/main/assets/geosite.dat")
 
     inputs.property("xrayUrl", xrayUrl)
-    outputs.file(jniLibFile)
+    outputs.files(jniLibFile, geoipFile, geositeFile)
 
     doLast {
-        if (!jniLibFile.exists()) {
-            outputDir.mkdirs()
+        val needsDownload = !jniLibFile.exists() || !geoipFile.exists() || !geositeFile.exists()
+        if (needsDownload) {
+            jniLibFile.parentFile.mkdirs()
+            geoipFile.parentFile.mkdirs()
             val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
             tempZip.parentFile.mkdirs()
             
-            println("Downloading Xray binary from $xrayUrl ...")
+            println("Downloading Xray package from $xrayUrl ...")
             try {
                 URL(xrayUrl).openStream().use { input ->
                     tempZip.outputStream().use { output ->
                         input.copyTo(output)
                     }
                 }
-                println("Download complete. Unzipping Xray binary...")
+                println("Download complete. Extracting files...")
                 zipTree(tempZip).forEach { extractedFile ->
-                    if (extractedFile.name == "xray") {
-                        extractedFile.copyTo(jniLibFile, overwrite = true)
-                        println("Successfully extracted xray binary to $jniLibFile")
+                    when (extractedFile.name) {
+                        "xray" -> {
+                            extractedFile.copyTo(jniLibFile, overwrite = true)
+                            println("Extracted xray core binary to $jniLibFile")
+                        }
+                        "geoip.dat" -> {
+                            extractedFile.copyTo(geoipFile, overwrite = true)
+                            println("Extracted geoip.dat to $geoipFile")
+                        }
+                        "geosite.dat" -> {
+                            extractedFile.copyTo(geositeFile, overwrite = true)
+                            println("Extracted geosite.dat to $geositeFile")
+                        }
                     }
                 }
             } catch (e: java.lang.Exception) {
-                println("Error downloading/extracting Xray: ${e.message}")
+                println("Error during download or extraction of Xray: ${e.message}")
                 throw e
             } finally {
                 if (tempZip.exists()) {
@@ -204,12 +217,12 @@ tasks.register("downloadXrayCore") {
                 }
             }
         } else {
-            println("libxray.so already exists, skipping download.")
+            println("Xray core binary and geodata files already exist. Skipping download.")
         }
     }
 }
 
-// tasks.named("preBuild") {
-//     dependsOn("downloadXrayCore")
-// }
+tasks.named("preBuild") {
+    dependsOn("downloadXrayCore")
+}
 

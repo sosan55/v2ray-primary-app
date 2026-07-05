@@ -119,6 +119,24 @@ class V2RayVpnService : VpnService() {
 
             val fdNum = interfaceDescriptor?.fd ?: -1
 
+            // Copy routing databases (geoip.dat and geosite.dat) from assets to filesDir if present
+            try {
+                listOf("geoip.dat", "geosite.dat").forEach { filename ->
+                    val destFile = File(filesDir, filename)
+                    if (!destFile.exists() || destFile.length() == 0L) {
+                        repository.log("SYSTEM", "INFO", "Copying $filename from assets to files directory...")
+                        assets.open(filename).use { input ->
+                            destFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        repository.log("SYSTEM", "SUCCESS", "$filename copied successfully. Size: ${destFile.length()} bytes.")
+                    }
+                }
+            } catch (e: Exception) {
+                repository.log("SYSTEM", "WARNING", "Could not copy routing databases from assets: ${e.localizedMessage}")
+            }
+
             // 2. Generate real configuration JSON string using the allocated file descriptor
             val configJson = XrayConfigGenerator.generate(server, fdNum, filesDir)
             val configFile = File(cacheDir, "xray_config.json")
@@ -150,6 +168,10 @@ class V2RayVpnService : VpnService() {
                 val processBuilder = ProcessBuilder()
                     .command(commandList)
                     .redirectErrorStream(true)
+
+                // Set location assets directory so Xray can find geoip.dat and geosite.dat
+                processBuilder.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
+                processBuilder.environment()["V2RAY_LOCATION_ASSET"] = filesDir.absolutePath
 
                 if (fdNum != -1) {
                     processBuilder.environment()["VPN_TUN_FD"] = fdNum.toString()
