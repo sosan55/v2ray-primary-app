@@ -258,7 +258,7 @@ class V2RayVpnService : VpnService() {
      * placing it in jniLibs — works, while downloading a binary to filesDir at runtime
      * and trying to execute it would silently fail.
      */
-    private fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
+    private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
         val nativeBinary = File(nativeLibDir, "libxray.so")
         if (nativeBinary.exists() && nativeBinary.length() > 1_000_000) {
