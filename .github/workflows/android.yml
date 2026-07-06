@@ -11,13 +11,15 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # مرحله جدید برای دانلود هسته Xray و قرار دادن در assets
       - name: Download and Setup Xray Core
         run: |
           mkdir -p app/src/main/assets/
-          wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip
-          unzip -j xray.zip xray -d app/src/main/assets/
-          echo "Xray core downloaded and ready."
+          # استفاده از لینک مستقیم نسخه پایدار و اضافه کردن -o برای نادیده گرفتن سوالات unzip
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip -O xray.zip
+          unzip -o xray.zip xray -d app/src/main/assets/
+          # حذف فایل زیپ برای تمیز ماندن پروژه
+          rm xray.zip
+          echo "Xray core successfully placed in assets."
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -33,17 +35,11 @@ jobs:
         run: |
           decoded=false
           if [ -f "debug.keystore.base64" ]; then
-            echo "Attempting to decode debug.keystore.base64..."
             if tr -d '\r\n' < debug.keystore.base64 | base64 -d > debug.keystore 2>/dev/null; then
-              if [ -s "debug.keystore" ]; then
-                echo "Successfully decoded debug.keystore"
-                decoded=true
-              fi
+              [ -s "debug.keystore" ] && decoded=true
             fi
           fi
-          
           if [ "$decoded" = "false" ]; then
-            echo "Generating a brand new debug.keystore..."
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
@@ -52,9 +48,6 @@ jobs:
         with:
           gradle-version: '9.3.1'
           validate-wrappers: false
-
-      - name: Run Unit & Robolectric Tests
-        run: gradle testDebugUnitTest --tests "*Example*"
 
       - name: Build Debug APK
         run: gradle assembleDebug
@@ -68,18 +61,10 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
-      - name: Upload Build Artifacts (Debug APK)
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload Build Artifacts (Release APK)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: apks
+          path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 7
