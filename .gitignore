@@ -16,3 +16,7 @@
 local.properties
 .env
 debug.keystore
+# Xray core binary and geo-data (downloaded automatically by the downloadXrayCore Gradle task)
+app/src/main/jniLibs/**/libxray.so
+app/src/main/assets/geoip.dat
+app/src/main/assets/geosite.dat
