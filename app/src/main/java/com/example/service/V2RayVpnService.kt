@@ -46,13 +46,13 @@ class V2RayVpnService : VpnService() {
     private fun startVpn() {
         createNotificationChannel()
         val intent = Intent(this, MainActivity::class.java)
-        
+
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-        
+
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent, pendingIntentFlags
         )
@@ -86,7 +86,7 @@ class V2RayVpnService : VpnService() {
             // 1. Establish the TUN Interface with requested routes and exclude our own package to prevent routing loop
             try {
                 repository.log("TUNNEL", "INFO", "Allocating local tun0 interface file descriptor...")
-                
+
                 val builder = Builder()
                     .setSession("V2RayDan")
                     .addAddress("10.0.0.2", 24) // Internal tunnel IP
@@ -147,19 +147,25 @@ class V2RayVpnService : VpnService() {
                 repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
             }
 
-            // 3. Discover and execute core binary process
+            // 3. Discover and execute core binary process.
+            // NOTE: The binary is expected to live at nativeLibraryDir/libxray.so, placed there
+            // by the app's jniLibs packaging (see build.gradle.kts:downloadXrayCore task).
+            // Android extracts jniLibs with execute permission at install time, which is why
+            // this location works while a runtime-downloaded file placed in filesDir would not
+            // (Android 10+ enforces W^X and blocks executing files written to internal storage).
             val binary = locateCoreBinary(applicationContext, repository)
             if (binary == null || !binary.exists()) {
-                repository.log("XRAY-CORE", "ERROR", "Xray/V2Ray compiled binary could not be found or copied. Please ensure a valid executable fits at assets.")
+                repository.log("XRAY-CORE", "ERROR", "Xray/V2Ray compiled binary could not be found. Expected it at nativeLibraryDir/libxray.so — check that the app was built with the Gradle downloadXrayCore task.")
                 withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED) // Transition anyway to show logs setup
+                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
+                stopSelf()
                 return@launch
             }
 
             try {
                 repository.log("XRAY-CORE", "INFO", "Executing core binary daemon: ${binary.absolutePath}")
-                
+
                 val commandList = mutableListOf<String>()
                 commandList.add(binary.absolutePath)
                 commandList.add("-config")
@@ -182,7 +188,7 @@ class V2RayVpnService : VpnService() {
                 xrayProcess = processBuilder.start()
 
                 repository.log("XRAY-CORE", "SUCCESS", "Process spawned successfully with process ID: ${xrayProcess.hashCode()}")
-                
+
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.CONNECTED)
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
@@ -204,6 +210,30 @@ class V2RayVpnService : VpnService() {
                         }
                     }
                 }
+
+                // The output stream closed, meaning the process exited (crashed, or was killed
+                // deliberately via stopVpn() -> xrayProcess?.destroy()). Check the exit code and
+                // reflect an unexpected crash accurately in the UI state, instead of silently
+                // leaving the state as CONNECTED while nothing is actually running.
+                val exitCode = try {
+                    xrayProcess?.waitFor()
+                } catch (e: Exception) {
+                    null
+                }
+
+                if (coroutineContext.isActive && xrayProcess != null) {
+                    // Still considered "running" from the service's perspective, meaning this
+                    // wasn't triggered by a deliberate stopVpn() call — the core process died on its own.
+                    repository.log(
+                        "XRAY-CORE",
+                        "ERROR",
+                        "Xray core process exited unexpectedly with code $exitCode. The tunnel is no longer active."
+                    )
+                    withContext(Dispatchers.Main) {
+                        VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                        VpnCoreManager.activeVpnCoreManager?.stopTracking()
+                    }
+                }
             } catch (e: Exception) {
                 repository.log("XRAY-CORE", "ERROR", "Execution fail: ${e.localizedMessage}")
                 withContext(Dispatchers.Main) {
@@ -213,82 +243,22 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    private suspend fun downloadXrayBinary(context: Context, destination: File, repository: V2RayRepository): Boolean = withContext(Dispatchers.IO) {
-        val downloadUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
-        try {
-            repository.log("SYSTEM", "INFO", "Initiating runtime download of Xray core binary from: $downloadUrl")
-            
-            val tempFile = File(context.cacheDir, "temp_xray_download")
-            if (tempFile.exists()) tempFile.delete()
-
-            java.net.URL(downloadUrl).openStream().use { input ->
-                tempFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-
-            repository.log("SYSTEM", "SUCCESS", "Download finished. Size: ${tempFile.length()} bytes.")
-
-            // Check if it is a ZIP archive
-            val isZip = try {
-                java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
-                    zipInput.nextEntry != null
-                }
-            } catch (e: Exception) {
-                false
-            }
-
-            if (isZip) {
-                repository.log("SYSTEM", "INFO", "Downloaded archive is a ZIP file. Extracting 'xray' dynamic binary...")
-                var extracted = false
-                java.util.zip.ZipInputStream(tempFile.inputStream()).use { zipInput ->
-                    var entry = zipInput.nextEntry
-                    while (entry != null) {
-                        if (entry.name == "xray" || entry.name.endsWith("/xray")) {
-                            destination.outputStream().use { output ->
-                                zipInput.copyTo(output)
-                            }
-                            extracted = true
-                            break
-                        }
-                        entry = zipInput.nextEntry
-                    }
-                }
-                tempFile.delete()
-                if (!extracted) {
-                    repository.log("SYSTEM", "ERROR", "Could not locate 'xray' executable within the downloaded ZIP package.")
-                    return@withContext false
-                }
-            } else {
-                // If it's a raw executable binary, shift it directly to destination
-                repository.log("SYSTEM", "INFO", "Downloaded file is a raw binary. Saving directly...")
-                tempFile.renameTo(destination)
-            }
-
-            // Set executable privileges
-            destination.setReadable(true, false)
-            val execOwner = destination.setExecutable(true, false)
-            val execAll = destination.setExecutable(true, true)
-            
-            try {
-                val chmod = Runtime.getRuntime().exec(arrayOf("chmod", "755", destination.absolutePath))
-                chmod.waitFor()
-                repository.log("SYSTEM", "SUCCESS", "Run-time chmod 755 execution succeeded on downloaded core binary.")
-            } catch (e: Exception) {
-                repository.log("SYSTEM", "WARNING", "System security shell chmod output: ${e.localizedMessage}")
-            }
-
-            repository.log("SYSTEM", "SUCCESS", "Runtime core binary download and extraction complete.")
-            return@withContext true
-        } catch (e: Exception) {
-            repository.log("SYSTEM", "ERROR", "Failed download sequence of core binary: ${e.localizedMessage}")
-            return@withContext false
-        }
-    }
-
-    private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
-        // 1. Primary check on Android 10+: ALWAYS check the nativeLibraryDir first!
-        // This is the read-only directory managed by Package Manager where files can be executed.
+    /**
+     * Locates the Xray core executable.
+     *
+     * The binary must live at nativeLibraryDir/libxray.so — placed there via the app's
+     * jniLibs packaging (see build.gradle.kts:downloadXrayCore task, which downloads the
+     * official Xray-core Android release and copies it to src/main/jniLibs/arm64-v8a/libxray.so).
+     *
+     * This location is required (not optional) on Android 10+: the OS enforces a W^X
+     * (write XOR execute) policy that blocks executing files written to app-private
+     * storage such as filesDir or cacheDir at runtime. jniLibs is the one directory
+     * Android extracts with execute permission at install time via PackageManager,
+     * which is why this technique — naming the executable with a .so suffix and
+     * placing it in jniLibs — works, while downloading a binary to filesDir at runtime
+     * and trying to execute it would silently fail.
+     */
+    private fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
         val nativeBinary = File(nativeLibDir, "libxray.so")
         if (nativeBinary.exists() && nativeBinary.length() > 1_000_000) {
@@ -296,51 +266,8 @@ class V2RayVpnService : VpnService() {
             return nativeBinary
         }
 
-        repository.log("SYSTEM", "WARNING", "libxray.so not found or too small in nativeLibraryDir. Attempting backup download or placeholder load...")
-
-        val filesBinary = File(context.filesDir, "xray")
-        
-        // Check if the file is absent or just a tiny placeholder (< 1000 bytes)
-        val needsDownload = !filesBinary.exists() || filesBinary.length() < 1000
-
-        if (needsDownload) {
-            repository.log("SYSTEM", "INFO", "Xray core binary on filesDir is missing or a placeholder. Starting download...")
-            val downloadSuccess = downloadXrayBinary(context, filesBinary, repository)
-            if (!downloadSuccess) {
-                repository.log("SYSTEM", "WARNING", "Direct download failed. Falling back to native shared library or assets...")
-                
-                // Fallback 1: Native binary preinstalled in nativeLibraryDir (checked again just in case)
-                if (nativeBinary.exists()) {
-                    repository.log("SYSTEM", "INFO", "Fallback located executable library in nativeLibraryDir: ${nativeBinary.name}")
-                    return nativeBinary
-                }
-                
-                // Fallback 2: Extract from assets placeholder (as a last resort failure backup)
-                try {
-                    repository.log("SYSTEM", "INFO", "Extracting fallback placeholder from assets to files directory: ${filesBinary.absolutePath}")
-                    context.assets.open("xray").use { input ->
-                        filesBinary.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                } catch (e: Exception) {
-                    repository.log("SYSTEM", "ERROR", "Failed to write placeholder: ${e.localizedMessage}")
-                }
-            }
-        }
-
-        // Ensure execution permissions on filesBinary (if it exists)
-        if (filesBinary.exists()) {
-            filesBinary.setReadable(true, false)
-            val p1 = filesBinary.setExecutable(true, false)
-            val p2 = filesBinary.setExecutable(true, true)
-            try {
-                val chmodProcess = Runtime.getRuntime().exec(arrayOf("chmod", "755", filesBinary.absolutePath))
-                chmodProcess.waitFor()
-            } catch (e: Exception) {}
-        }
-
-        return filesBinary
+        repository.log("SYSTEM", "ERROR", "libxray.so not found (or too small) in nativeLibraryDir: ${nativeBinary.absolutePath}. This means the APK was not built correctly — check that the Gradle downloadXrayCore task ran and placed a valid binary there.")
+        return null
     }
 
     private fun stopVpn() {
