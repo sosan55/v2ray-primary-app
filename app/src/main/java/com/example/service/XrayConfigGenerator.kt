@@ -36,8 +36,17 @@ object XrayConfigGenerator {
             ""
         }
 
-        // Safety verification: only append geoip/geosite strings if files actually exist on filesystem to prevent core crash
-        val hasGeodata = filesDir != null && File(filesDir, "geoip.dat").exists() && File(filesDir, "geosite.dat").exists()
+        // Safety verification: only append geoip strings if the geoip.dat file actually
+        // exists, to prevent a core crash from a missing/corrupt file.
+        //
+        // NOTE: We intentionally do NOT reference "geosite:ir" here. The geosite.dat
+        // bundled with official Xray-core releases does not include an "ir" domain
+        // category (confirmed: https://github.com/XTLS/Xray-core/issues/1406 —
+        // "we couldn't use category-ir in Iran using xray"). Referencing it causes
+        // Xray-core to fail parsing the config at startup:
+        //   "infra/conf: failed to parse ...domain rule: geosite:ir"
+        // The regexp rules below already cover .ir domains without needing that category.
+        val hasGeoip = filesDir != null && File(filesDir, "geoip.dat").exists()
 
         val routingRules = """
           "routing": {
@@ -49,7 +58,6 @@ object XrayConfigGenerator {
                 "domain": [
                   "regexp:\\.ir$",
                   "regexp:^[^.]*\\.ir$"
-                  ${if (hasGeodata) ",\"geosite:ir\"" else ""}
                 ]
               },
               {
@@ -63,7 +71,7 @@ object XrayConfigGenerator {
                   "100.64.0.0/10",
                   "fc00::/7",
                   "fe80::/10"
-                  ${if (hasGeodata) ",\"geoip:private\",\"geoip:ir\"" else ""}
+                  ${if (hasGeoip) ",\"geoip:private\",\"geoip:ir\"" else ""}
                 ]
               }
             ]
