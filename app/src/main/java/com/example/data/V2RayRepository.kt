@@ -13,6 +13,7 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
+import java.net.URLDecoder as JURLDecoder
 import java.nio.charset.StandardCharsets
 
 class V2RayRepository(private val db: V2RayDatabase) {
@@ -82,19 +83,25 @@ class V2RayRepository(private val db: V2RayDatabase) {
         val server = serverDao.getServerById(serverId) ?: return@withContext -1
         val start = System.currentTimeMillis()
         var pingResult = -1
+        var socket: Socket? = null
         try {
-            val socket = Socket()
+            socket = Socket()
             // We use standard handshake timeout of 1200ms
             socket.connect(InetSocketAddress(server.address, server.port), 1200)
             val end = System.currentTimeMillis()
             pingResult = (end - start).toInt()
-            socket.close()
             serverDao.updatePing(serverId, pingResult)
             log("PING", "SUCCESS", "Ping response from ${server.name}: ${pingResult}ms")
         } catch (e: Exception) {
             log("PING", "ERROR", "Failed to ping ${server.name} (${server.address}:${server.port}): ${e.localizedMessage}")
             serverDao.updatePing(serverId, -2) // -2 indicates timeout/unreachable
             pingResult = -2
+        } finally {
+            try {
+                socket?.close()
+            } catch (e: Exception) {
+                Log.w("V2RayRepository", "Failed to close socket", e)
+            }
         }
         return@withContext pingResult
     }
@@ -114,43 +121,51 @@ class V2RayRepository(private val db: V2RayDatabase) {
             
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                val reader = BufferedReader(InputStreamReader(connection.inputStream))
-                val content = StringBuilder()
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    content.append(line)
-                }
-                reader.close()
-                connection.disconnect()
-
-                var rawData = content.toString().trim()
-                // Try Base64 decoding the file content if standard subscription payload
+                var reader: BufferedReader? = null
                 try {
-                    val decodedBytes = Base64.decode(rawData, Base64.DEFAULT)
-                    rawData = String(decodedBytes, StandardCharsets.UTF_8)
-                } catch (e: Exception) {
-                    // Try without Base64 URL safe, or assume plain lines
-                }
+                    reader = BufferedReader(InputStreamReader(connection.inputStream))
+                    val content = StringBuilder()
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        content.append(line)
+                    }
 
-                val links = rawData.split("\n", "\r").map { it.trim() }.filter { it.isNotEmpty() }
-                val parsedConfigs = mutableListOf<ServerEntity>()
-                for (link in links) {
-                    val parsed = parseShareLink(link)
-                    if (parsed != null) {
-                        parsedConfigs.add(parsed)
+                    var rawData = content.toString().trim()
+                    // Try Base64 decoding the file content if standard subscription payload
+                    try {
+                        val decodedBytes = Base64.decode(rawData, Base64.DEFAULT)
+                        rawData = String(decodedBytes, StandardCharsets.UTF_8)
+                    } catch (e: Exception) {
+                        // Try without Base64 URL safe, or assume plain lines
+                    }
+
+                    val links = rawData.split("\n", "\r").map { it.trim() }.filter { it.isNotEmpty() }
+                    val parsedConfigs = mutableListOf<ServerEntity>()
+                    for (link in links) {
+                        val parsed = parseShareLink(link)
+                        if (parsed != null) {
+                            parsedConfigs.add(parsed)
+                        }
+                    }
+
+                    if (parsedConfigs.isNotEmpty()) {
+                        serverDao.insertServers(parsedConfigs)
+                        parsedCount = parsedConfigs.size
+                        log("SUBSCRIPTION", "SUCCESS", "Successfully imported $parsedCount servers from subscription ${subscription.name}")
+                        
+                        // Update subscription timestamp
+                        subscriptionDao.insertSubscription(subscription.copy(lastUpdated = System.currentTimeMillis()))
+                    } else {
+                        log("SUBSCRIPTION", "WARNING", "No valid V2Ray share links found in the subscription body")
+                    }
+                } finally {
+                    try {
+                        reader?.close()
+                    } catch (e: Exception) {
+                        Log.w("V2RayRepository", "Failed to close reader", e)
                     }
                 }
-
-                if (parsedConfigs.isNotEmpty()) {
-                    serverDao.insertServers(parsedConfigs)
-                    parsedCount = parsedConfigs.size
-                    log("SUBSCRIPTION", "SUCCESS", "Successfully imported $parsedCount servers from subscription ${subscription.name}")
-                    
-                    // Update subscription timestamp
-                    subscriptionDao.insertSubscription(subscription.copy(lastUpdated = System.currentTimeMillis()))
-                } else {
-                    log("SUBSCRIPTION", "WARNING", "No valid V2Ray share links found in the subscription body")
-                }
+                connection.disconnect()
             } else {
                 log("SUBSCRIPTION", "ERROR", "Server response error code: $responseCode")
             }
@@ -423,7 +438,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
 object URLDecoder {
     fun decode(s: String): String {
         return try {
-            java.net.URLDecoder.decode(s, "UTF-8")
+            JURLDecoder.decode(s, "UTF-8")
         } catch (e: Exception) {
             s
         }
