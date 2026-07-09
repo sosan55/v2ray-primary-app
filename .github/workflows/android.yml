@@ -24,6 +24,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Set up Gradle (to regenerate wrapper)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Fix corrupt gradle-wrapper.jar
+        run: gradle wrapper --gradle-version 9.3.1 --distribution-type bin
+
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
