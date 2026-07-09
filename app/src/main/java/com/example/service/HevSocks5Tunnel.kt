@@ -24,8 +24,23 @@ object HevSocks5Tunnel {
     @Volatile
     private var isRunning = false
 
+    @Volatile
+    private var libraryLoaded = false
+
+    private var libraryLoadError: Throwable? = null
+
     init {
-        System.loadLibrary("hev-socks5-tunnel")
+        try {
+            System.loadLibrary("hev-socks5-tunnel")
+            libraryLoaded = true
+        } catch (e: UnsatisfiedLinkError) {
+            // Most likely cause: libhev-socks5-tunnel.so isn't present under
+            // jniLibs/<abi>/ for this ABI — e.g. the Gradle task that downloads
+            // and places it hasn't run, or ran for the wrong ABI. Swallow it here
+            // so referencing this object doesn't crash the whole app; start()
+            // will instead throw a clear, catchable IllegalStateException below.
+            libraryLoadError = e
+        }
     }
 
     /**
@@ -47,6 +62,13 @@ object HevSocks5Tunnel {
      * dedicated Thread (see V2RayVpnService), not from a coroutine.
      */
     fun start(configPath: String, tunFd: Int): Int {
+        if (!libraryLoaded) {
+            throw IllegalStateException(
+                "libhev-socks5-tunnel.so failed to load (${libraryLoadError?.message}). " +
+                "Check that it's bundled under jniLibs/<abi>/ for this device's ABI.",
+                libraryLoadError
+            )
+        }
         isRunning = true
         return try {
             nativeMainFromFile(configPath, tunFd)
