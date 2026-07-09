@@ -1,12 +1,11 @@
 package com.example.data
 
-import android.content.Context
 import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -70,8 +69,10 @@ class V2RayRepository(private val db: V2RayDatabase) {
     }
 
     suspend fun log(tag: String, level: String, message: String) {
-        logDao.insertLog(LogEntity(tag = tag, level = level, message = message))
-        Log.d("V2RayDan-$tag", "[$level] $message")
+        // Avoid logging sensitive tokens directly; mask long tokens
+        val safeMessage = message.replace(Regex("[A-Za-z0-9_-]{20,}")) { "[REDACTED]" }
+        logDao.insertLog(LogEntity(tag = tag, level = level, message = safeMessage))
+        Log.d("V2RayDan-$tag", "[$level] $safeMessage")
     }
 
     suspend fun clearLogs() {
@@ -93,7 +94,11 @@ class V2RayRepository(private val db: V2RayDatabase) {
             serverDao.updatePing(serverId, pingResult)
             log("PING", "SUCCESS", "Ping response from ${server.name}: ${pingResult}ms")
         } catch (e: Exception) {
-            log("PING", "ERROR", "Failed to ping ${server.name} (${server.address}:${server.port}): ${e.localizedMessage}")
+            log(
+                "PING",
+                "ERROR",
+                "Failed to ping ${server.name} (${server.address}:${server.port}): ${e.localizedMessage}"
+            )
             serverDao.updatePing(serverId, -2) // -2 indicates timeout/unreachable
             pingResult = -2
         } finally {
@@ -109,63 +114,59 @@ class V2RayRepository(private val db: V2RayDatabase) {
     // Real subscription import and link parsing!
     suspend fun syncSubscription(subscription: SubscriptionEntity): Int = withContext(Dispatchers.IO) {
         var parsedCount = 0
+        var connection: HttpURLConnection? = null
         try {
             log("SUBSCRIPTION", "INFO", "Syncing subscription: ${subscription.name} url: ${subscription.url}")
-            
+
             // Fetch subscription body
-            val connection = URL(subscription.url).openConnection() as HttpURLConnection
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("User-Agent", "v2rayNG/1.8.5 (Android)")
-            
+            connection = (URL(subscription.url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 5000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "v2rayNG/1.8.5 (Android)")
+            }
+
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                var reader: BufferedReader? = null
-                try {
-                    reader = BufferedReader(InputStreamReader(connection.inputStream))
-                    val content = StringBuilder()
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null) {
-                        content.append(line)
-                    }
+                val rawData: String = connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
 
-                    var rawData = content.toString().trim()
-                    // Try Base64 decoding the file content if standard subscription payload
-                    try {
-                        val decodedBytes = Base64.decode(rawData, Base64.DEFAULT)
-                        rawData = String(decodedBytes, StandardCharsets.UTF_8)
-                    } catch (e: Exception) {
-                        // Try without Base64 URL safe, or assume plain lines
-                    }
+                var body = rawData.trim()
 
-                    val links = rawData.split("\n", "\r").map { it.trim() }.filter { it.isNotEmpty() }
-                    val parsedConfigs = mutableListOf<ServerEntity>()
-                    for (link in links) {
-                        val parsed = parseShareLink(link)
-                        if (parsed != null) {
-                            parsedConfigs.add(parsed)
-                        }
-                    }
+                // Heuristic: try Base64 decode, but validate result contains expected schemes or newlines
+                val tryDecoded = try {
+                    val decodedBytes = Base64.decode(body, Base64.DEFAULT)
+                    val decodedStr = String(decodedBytes, StandardCharsets.UTF_8)
+                    if (decodedStr.contains("vless://") || decodedStr.contains("vmess://") || decodedStr.contains("ss://") || decodedStr.contains("trojan://") || decodedStr.contains("://")) {
+                        decodedStr
+                    } else null
+                } catch (ex: Exception) {
+                    null
+                }
 
-                    if (parsedConfigs.isNotEmpty()) {
-                        serverDao.insertServers(parsedConfigs)
-                        parsedCount = parsedConfigs.size
-                        log("SUBSCRIPTION", "SUCCESS", "Successfully imported $parsedCount servers from subscription ${subscription.name}")
-                        
-                        // Update subscription timestamp
-                        subscriptionDao.insertSubscription(subscription.copy(lastUpdated = System.currentTimeMillis()))
-                    } else {
-                        log("SUBSCRIPTION", "WARNING", "No valid V2Ray share links found in the subscription body")
-                    }
-                } finally {
-                    try {
-                        reader?.close()
-                    } catch (e: Exception) {
-                        Log.w("V2RayRepository", "Failed to close reader", e)
+                if (tryDecoded != null && tryDecoded.isNotBlank()) {
+                    body = tryDecoded
+                }
+
+                // Split into lines robustly
+                val links = body.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
+                val parsedConfigs = mutableListOf<ServerEntity>()
+                for (link in links) {
+                    val parsed = parseShareLink(link)
+                    if (parsed != null) {
+                        parsedConfigs.add(parsed)
                     }
                 }
-                connection.disconnect()
+
+                if (parsedConfigs.isNotEmpty()) {
+                    serverDao.insertServers(parsedConfigs)
+                    parsedCount = parsedConfigs.size
+                    log("SUBSCRIPTION", "SUCCESS", "Successfully imported $parsedCount servers from subscription ${subscription.name}")
+
+                    // Update subscription timestamp
+                    subscriptionDao.insertSubscription(subscription.copy(lastUpdated = System.currentTimeMillis()))
+                } else {
+                    log("SUBSCRIPTION", "WARNING", "No valid V2Ray share links found in the subscription body")
+                }
             } else {
                 log("SUBSCRIPTION", "ERROR", "Server response error code: $responseCode")
             }
@@ -176,6 +177,11 @@ class V2RayRepository(private val db: V2RayDatabase) {
             serverDao.insertServers(seedConfigs)
             parsedCount = seedConfigs.size
             log("SUBSCRIPTION", "SUCCESS", "Demo connection fallback activated. Synced ${seedConfigs.size} global servers.")
+        } finally {
+            try {
+                connection?.disconnect()
+            } catch (ignored: Exception) {
+            }
         }
         return@withContext parsedCount
     }
@@ -183,109 +189,74 @@ class V2RayRepository(private val db: V2RayDatabase) {
     private fun generateDemoConfigs(subName: String): List<ServerEntity> {
         return listOf(
             ServerEntity(
-                name = "🇩🇪 Germany - Anycast Hub 01",
+                name = "Example - Europe",
                 type = "VLESS",
-                address = "speed.cloudflare.com",
+                address = "example.com",
                 port = 443,
-                uuid = "7a6e12e1-419b-4ff2-a4e1-22e3ad5b78ff",
+                uuid = "",
                 tls = true,
-                sni = "speed.cloudflare.com",
+                sni = "example.com",
                 network = "ws",
-                path = "/vless-ws"
+                path = "/vless"
             ),
             ServerEntity(
-                name = "🇺🇸 USA Premium - Cloud Node 02",
+                name = "Example - US",
                 type = "VMESS",
-                address = "cloudflare.com",
+                address = "example.org",
                 port = 443,
-                uuid = "41f17fa9-0d2d-419f-b9d9-930ecf9cf719",
+                uuid = "",
                 tls = true,
                 network = "ws",
                 path = "/vmess"
-            ),
-            ServerEntity(
-                name = "🇫🇷 France Fast-DNS 03",
-                type = "TROJAN",
-                address = "dns.quad9.net",
-                port = 443,
-                uuid = "fr-password-danvpn",
-                tls = true,
-                sni = "dns.quad9.net",
-                network = "tcp"
-            ),
-            ServerEntity(
-                name = "🇸🇬 Singapore Anycast Node 04",
-                type = "VLESS",
-                address = "one.one.one.one",
-                port = 443,
-                uuid = "b7289ee1-ce12-4ee1-ffdd-2093eefcf23a",
-                tls = true,
-                sni = "one.one.one.one",
-                network = "ws",
-                path = "/ws"
-            ),
-            ServerEntity(
-                name = "🇯🇵 Japan Tokyo Edge 05",
-                type = "SHADOWSOCKS",
-                address = "dns.google",
-                port = 443,
-                uuid = "chacha20-ietf-poly1305:mypassword1",
-                tls = true,
-                network = "tcp"
             )
         )
     }
 
     fun parseShareLink(link: String): ServerEntity? {
         try {
-            if (link.startsWith("vless://")) {
-                // Format: vless://uuid@host:port?query
-                val rawBody = link.substring(8)
+            val trimmed = link.trim()
+            if (trimmed.startsWith("vless://", true)) {
+                // Format: vless://uuid@host:port?query#name
+                val rawBody = trimmed.substringAfter("vless://")
                 val atIndex = rawBody.indexOf('@')
-                val colonIndex = rawBody.indexOf(':', atIndex)
-                val questionIndex = rawBody.indexOf('?', colonIndex)
-
+                if (atIndex <= 0) return null
                 val uuid = rawBody.substring(0, atIndex)
-                val address = if (colonIndex != -1) rawBody.substring(atIndex + 1, colonIndex) else rawBody.substring(atIndex + 1)
-                
-                val portStr = if (colonIndex != -1) {
-                    if (questionIndex != -1) rawBody.substring(colonIndex + 1, questionIndex)
-                    else rawBody.substring(colonIndex + 1)
-                } else "443"
-                val port = portStr.toIntOrNull() ?: 443
 
-                var tls = false
-                var sni = ""
-                var network = "tcp"
-                var path = ""
-                var name = "VLESS Server"
-                var flow = ""
-                var fingerprint = ""
-                var publicKey = ""
-                var shortId = ""
-                var securityParam = "none"
+                val hostPortAndQuery = rawBody.substring(atIndex + 1)
+                val questionIndex = hostPortAndQuery.indexOf('?')
+                val hashIndex = hostPortAndQuery.indexOf('#')
 
-                if (questionIndex != -1) {
-                    val queryAndHash = rawBody.substring(questionIndex + 1)
-                    val hashIndex = queryAndHash.indexOf('#')
-                    val query = if (hashIndex != -1) queryAndHash.substring(0, hashIndex) else queryAndHash
-                    
-                    if (hashIndex != -1) {
-                        name = URLDecoder.decode(queryAndHash.substring(hashIndex + 1))
-                    }
-
-                    val params = parseQueryParams(query)
-                    securityParam = params["security"]?.lowercase() ?: "none"
-                    tls = securityParam == "tls" || securityParam == "reality" || params["tls"] == "true"
-                    sni = params["sni"] ?: ""
-                    network = params["type"] ?: params["network"] ?: "tcp"
-                    path = params["path"] ?: ""
-                    
-                    flow = params["flow"] ?: ""
-                    fingerprint = params["fp"] ?: ""
-                    publicKey = params["pbk"] ?: ""
-                    shortId = params["sid"] ?: ""
+                val hostPort = if (questionIndex != -1) hostPortAndQuery.substring(0, questionIndex) else if (hashIndex != -1) hostPortAndQuery.substring(0, hashIndex) else hostPortAndQuery
+                val address: String
+                val port: Int
+                if (hostPort.contains(':')) {
+                    val parts = hostPort.split(":", limit = 2)
+                    address = parts[0]
+                    port = parts.getOrNull(1)?.toIntOrNull() ?: 443
+                } else {
+                    address = hostPort
+                    port = 443
                 }
+
+                var name = "VLESS Server"
+                var paramsStr = ""
+                if (questionIndex != -1) {
+                    paramsStr = hostPortAndQuery.substring(questionIndex + 1, if (hashIndex != -1) hashIndex else hostPortAndQuery.length)
+                }
+                if (hashIndex != -1) {
+                    name = URLDecoder.decode(hostPortAndQuery.substring(hashIndex + 1))
+                }
+
+                val params = if (paramsStr.isNotEmpty()) parseQueryParams(paramsStr) else emptyMap()
+                val securityParam = params["security"]?.lowercase() ?: "none"
+                val tls = securityParam == "tls" || securityParam == "reality" || params["tls"] == "true"
+                val sni = params["sni"] ?: ""
+                val network = params["type"] ?: params["network"] ?: "tcp"
+                val path = params["path"] ?: ""
+                val flow = params["flow"] ?: ""
+                val fingerprint = params["fp"] ?: ""
+                val publicKey = params["pbk"] ?: ""
+                val shortId = params["sid"] ?: ""
 
                 return ServerEntity(
                     name = name,
@@ -303,20 +274,28 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     publicKey = publicKey,
                     shortId = shortId
                 )
-            } else if (link.startsWith("vmess://")) {
-                // vmess links are either base64 encoded strings of JSON configurations
-                val base64Content = link.substring(8).trim()
-                val decoded = String(Base64.decode(base64Content, Base64.DEFAULT), StandardCharsets.UTF_8)
-                // Decode JSON (simple regex or hand parse)
-                val ps = getValueFromJson(decoded, "ps") ?: "VMess Server"
-                val add = getValueFromJson(decoded, "add") ?: "0.0.0.0"
-                val port = getValueFromJson(decoded, "port")?.toIntOrNull() ?: 443
-                val id = getValueFromJson(decoded, "id") ?: ""
-                val aid = getValueFromJson(decoded, "aid")?.toIntOrNull() ?: 0
-                val net = getValueFromJson(decoded, "net") ?: "tcp"
-                val path = getValueFromJson(decoded, "path") ?: ""
-                val host = getValueFromJson(decoded, "host") ?: ""
-                val tls = getValueFromJson(decoded, "tls") == "tls"
+            } else if (trimmed.startsWith("vmess://", true)) {
+                val base64Content = trimmed.substringAfter("vmess://").trim()
+                val decoded = try {
+                    String(Base64.decode(base64Content, Base64.DEFAULT), StandardCharsets.UTF_8)
+                } catch (e: Exception) {
+                    return null
+                }
+                // Parse JSON safely
+                val json = try {
+                    JSONObject(decoded)
+                } catch (e: Exception) {
+                    return null
+                }
+                val ps = json.optString("ps", "VMess Server")
+                val add = json.optString("add", "0.0.0.0")
+                val port = json.optInt("port", 443)
+                val id = json.optString("id", "")
+                val aid = json.optInt("aid", 0)
+                val net = json.optString("net", "tcp")
+                val path = json.optString("path", "")
+                val host = json.optString("host", "")
+                val tls = json.optString("tls", "") == "tls"
 
                 return ServerEntity(
                     name = ps,
@@ -330,64 +309,69 @@ class V2RayRepository(private val db: V2RayDatabase) {
                     host = host,
                     tls = tls
                 )
-            } else if (link.startsWith("ss://")) {
-                // ss://base64(method:password)@host:port#name
-                val rawBody = link.substring(5)
+            } else if (trimmed.startsWith("ss://", true)) {
+                // ss://base64(method:password)@host:port#name  OR ss://method:password@host:port#name
+                val rawBody = trimmed.substringAfter("ss://")
                 val hashIndex = rawBody.indexOf('#')
-                var mainBody = if (hashIndex != -1) rawBody.substring(0, hashIndex) else rawBody
+                val mainBody = if (hashIndex != -1) rawBody.substring(0, hashIndex) else rawBody
                 val serverName = if (hashIndex != -1) URLDecoder.decode(rawBody.substring(hashIndex + 1)) else "Shadowsocks Server"
 
+                // If mainBody contains '@' then it could be either base64 part before @ or method:pass@host:port
                 val atIndex = mainBody.indexOf('@')
                 if (atIndex != -1) {
-                    val cryptInfoB64 = mainBody.substring(0, atIndex)
-                    val cryptInfo = String(Base64.decode(cryptInfoB64, Base64.DEFAULT), StandardCharsets.UTF_8)
-                    val hostPort = mainBody.substring(atIndex + 1)
-                    val colonIndex = hostPort.indexOf(':')
-                    val address = if (colonIndex != -1) hostPort.substring(0, colonIndex) else hostPort
-                    val port = if (colonIndex != -1) hostPort.substring(colonIndex + 1).toIntOrNull() ?: 1080 else 1080
+                    val left = mainBody.substring(0, atIndex)
+                    val right = mainBody.substring(atIndex + 1)
+
+                    val cryptInfo = try {
+                        // try base64 decode left; if fails, treat left as plain method:password
+                        val decoded = String(Base64.decode(left, Base64.DEFAULT), StandardCharsets.UTF_8)
+                        if (decoded.contains(":")) decoded else left
+                    } catch (e: Exception) {
+                        left
+                    }
+
+                    val colonIndex = right.indexOf(':')
+                    val address = if (colonIndex != -1) right.substring(0, colonIndex) else right
+                    val port = if (colonIndex != -1) right.substring(colonIndex + 1).toIntOrNull() ?: 1080 else 1080
 
                     return ServerEntity(
                         name = serverName,
                         type = "SHADOWSOCKS",
                         address = address,
                         port = port,
-                        uuid = cryptInfo, // Store crypto info inside UUID field for convenience
+                        uuid = cryptInfo,
                         tls = false
                     )
                 }
-            } else if (link.startsWith("trojan://")) {
-                // trojan://password@host:port?query#name
-                val rawBody = link.substring(9)
+            } else if (trimmed.startsWith("trojan://", true)) {
+                val rawBody = trimmed.substringAfter("trojan://")
                 val atIndex = rawBody.indexOf('@')
-                val colonIndex = rawBody.indexOf(':', atIndex)
-                val questionIndex = rawBody.indexOf('?', colonIndex)
-                
+                if (atIndex <= 0) return null
                 val password = rawBody.substring(0, atIndex)
-                val address = if (colonIndex != -1) rawBody.substring(atIndex + 1, colonIndex) else rawBody.substring(atIndex + 1)
-                
-                val portStr = if (colonIndex != -1) {
-                    if (questionIndex != -1) rawBody.substring(colonIndex + 1, questionIndex)
-                    else rawBody.substring(colonIndex + 1)
-                } else "443"
-                val port = portStr.toIntOrNull() ?: 443
+                val hostPortAndQuery = rawBody.substring(atIndex + 1)
+                val questionIndex = hostPortAndQuery.indexOf('?')
+                val hashIndex = hostPortAndQuery.indexOf('#')
+                val hostPort = if (questionIndex != -1) hostPortAndQuery.substring(0, questionIndex) else if (hashIndex != -1) hostPortAndQuery.substring(0, hashIndex) else hostPortAndQuery
 
-                var tls = true
-                var sni = ""
-                var name = "Trojan Server"
-
-                if (questionIndex != -1) {
-                    val queryAndHash = rawBody.substring(questionIndex + 1)
-                    val hashIndex = queryAndHash.indexOf('#')
-                    val query = if (hashIndex != -1) queryAndHash.substring(0, hashIndex) else queryAndHash
-                    
-                    if (hashIndex != -1) {
-                        name = URLDecoder.decode(queryAndHash.substring(hashIndex + 1))
-                    }
-
-                    val params = parseQueryParams(query)
-                    tls = params["security"]?.lowercase() != "none" && params["tls"]?.lowercase() != "false"
-                    sni = params["sni"] ?: ""
+                val (address, port) = if (hostPort.contains(':')) {
+                    val parts = hostPort.split(":", limit = 2)
+                    parts[0] to (parts.getOrNull(1)?.toIntOrNull() ?: 443)
+                } else {
+                    hostPort to 443
                 }
+
+                var name = "Trojan Server"
+                var paramsStr = ""
+                if (questionIndex != -1) {
+                    paramsStr = hostPortAndQuery.substring(questionIndex + 1, if (hashIndex != -1) hashIndex else hostPortAndQuery.length)
+                }
+                if (hashIndex != -1) {
+                    name = URLDecoder.decode(hostPortAndQuery.substring(hashIndex + 1))
+                }
+
+                val params = if (paramsStr.isNotEmpty()) parseQueryParams(paramsStr) else emptyMap()
+                val tls = params["security"]?.lowercase() != "none" && params["tls"]?.lowercase() != "false"
+                val sni = params["sni"] ?: ""
 
                 return ServerEntity(
                     name = name,
@@ -406,6 +390,7 @@ class V2RayRepository(private val db: V2RayDatabase) {
     }
 
     private fun parseQueryParams(query: String): Map<String, String> {
+        if (query.isBlank()) return emptyMap()
         val params = mutableMapOf<String, String>()
         val pairs = query.split("&")
         for (pair in pairs) {
@@ -414,23 +399,21 @@ class V2RayRepository(private val db: V2RayDatabase) {
                 val key = URLDecoder.decode(pair.substring(0, idx))
                 val value = URLDecoder.decode(pair.substring(idx + 1))
                 params[key] = value
+            } else if (pair.isNotEmpty()) {
+                params[URLDecoder.decode(pair)] = ""
             }
         }
         return params
     }
 
     private fun getValueFromJson(json: String, key: String): String? {
-        val pattern = "\"$key\"\\s*:\\s*\"([^\"]*)\"".toRegex()
-        val match = pattern.find(json)
-        if (match != null) {
-            return match.groupValues[1]
+        // Keep for backward compatibility but prefer JSONObject
+        return try {
+            val obj = JSONObject(json)
+            if (obj.has(key)) obj.optString(key) else null
+        } catch (e: Exception) {
+            null
         }
-        val patternInt = "\"$key\"\\s*:\\s*(\\d+)".toRegex()
-        val matchInt = patternInt.find(json)
-        if (matchInt != null) {
-            return matchInt.groupValues[1]
-        }
-        return null
     }
 }
 
