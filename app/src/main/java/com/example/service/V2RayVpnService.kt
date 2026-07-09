@@ -18,11 +18,14 @@ import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.net.InetSocketAddress
+import java.net.Socket
 
 class V2RayVpnService : VpnService() {
 
     private var interfaceDescriptor: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
+    private var hevTunnelThread: Thread? = null
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
@@ -137,12 +140,15 @@ class V2RayVpnService : VpnService() {
                 repository.log("SYSTEM", "WARNING", "Could not copy routing databases from assets: ${e.localizedMessage}")
             }
 
-            // 2. Generate real configuration JSON string using the allocated file descriptor
-            val configJson = XrayConfigGenerator.generate(server, fdNum, filesDir)
+            // 2. Generate the Xray config. Xray never sees the TUN fd or has any
+            // "tun" inbound — it only exposes a plain SOCKS5 inbound on loopback.
+            // The TUN layer is handled separately by hev-socks5-tunnel (step 4 below),
+            // once we've confirmed this SOCKS5 inbound is actually up.
+            val configJson = XrayConfigGenerator.generate(server, filesDir)
             val configFile = File(cacheDir, "xray_config.json")
             try {
                 configFile.writeText(configJson)
-                repository.log("CONFIG", "SUCCESS", "Generated real client config format with Tun/FD support. Path: ${configFile.absolutePath}")
+                repository.log("CONFIG", "SUCCESS", "Generated Xray config (socks-only inbound). Path: ${configFile.absolutePath}")
             } catch (e: Exception) {
                 repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
             }
@@ -179,12 +185,6 @@ class V2RayVpnService : VpnService() {
                 processBuilder.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
                 processBuilder.environment()["V2RAY_LOCATION_ASSET"] = filesDir.absolutePath
 
-                if (fdNum != -1) {
-                    processBuilder.environment()["VPN_TUN_FD"] = fdNum.toString()
-                    processBuilder.environment()["TUN_FD"] = fdNum.toString()
-                    repository.log("TUNNEL", "SUCCESS", "Tethered TUN interface descriptor (fd: $fdNum) of VpnService to background core process successfully.")
-                }
-
                 xrayProcess = processBuilder.start()
 
                 repository.log("XRAY-CORE", "SUCCESS", "Process spawned successfully with process ID: ${xrayProcess.hashCode()}")
@@ -194,32 +194,67 @@ class V2RayVpnService : VpnService() {
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
                 }
 
-                // Pipe real stdout/stderr to repository logs in real-time, filtered to avoid DB write queue saturation
-                val reader = BufferedReader(InputStreamReader(xrayProcess?.inputStream))
-                var line: String?
-                while (coroutineContext.isActive && xrayProcess != null) {
-                    line = withContext(Dispatchers.IO) { reader.readLine() }
-                    if (line == null) break
-                    if (line.isNotBlank()) {
-                        Log.d("XRAY-CORE", line)
-                        // Skip highly spammy per-packet logs to protect Room database write queue and prevent UI freeze
-                        val isNoisy = line.contains("tcp:") || line.contains("udp:") || line.contains("email:") || line.contains("accepted") || line.contains("127.0.0.1:")
-                        if (!isNoisy || line.contains("warning", ignoreCase = true) || line.contains("error", ignoreCase = true)) {
-                            val trimmedLine = if (line.length > 200) line.take(200) + "..." else line
-                            repository.log("XRAY-CORE", if (line.contains("error", ignoreCase = true)) "ERROR" else "INFO", trimmedLine)
+                // Pipe stdout/stderr to repository logs on its own coroutine, so this
+                // coroutine can move on to starting the tunnel layer instead of blocking
+                // here until Xray exits.
+                val logJob = serviceScope.launch {
+                    val reader = BufferedReader(InputStreamReader(xrayProcess?.inputStream))
+                    var line: String?
+                    while (isActive && xrayProcess != null) {
+                        line = withContext(Dispatchers.IO) { reader.readLine() }
+                        if (line == null) break
+                        if (line.isNotBlank()) {
+                            Log.d("XRAY-CORE", line)
+                            // Skip highly spammy per-packet logs to protect Room database write queue and prevent UI freeze
+                            val isNoisy = line.contains("tcp:") || line.contains("udp:") || line.contains("email:") || line.contains("accepted") || line.contains("127.0.0.1:")
+                            if (!isNoisy || line.contains("warning", ignoreCase = true) || line.contains("error", ignoreCase = true)) {
+                                val trimmedLine = if (line.length > 200) line.take(200) + "..." else line
+                                repository.log("XRAY-CORE", if (line.contains("error", ignoreCase = true)) "ERROR" else "INFO", trimmedLine)
+                            }
                         }
                     }
                 }
 
-                // The output stream closed, meaning the process exited (crashed, or was killed
-                // deliberately via stopVpn() -> xrayProcess?.destroy()). Check the exit code and
-                // reflect an unexpected crash accurately in the UI state, instead of silently
-                // leaving the state as CONNECTED while nothing is actually running.
+                // 4. Only once Xray's local SOCKS5 inbound is actually accepting
+                // connections do we hand the TUN fd to hev-socks5-tunnel. Starting
+                // the tunnel before Xray is ready would just mean every packet gets
+                // dropped with connection-refused until Xray catches up.
+                val socksReady = waitForSocksReady(XrayConfigGenerator.SOCKS_INBOUND_PORT)
+                if (!socksReady) {
+                    repository.log("XRAY-CORE", "ERROR", "Xray's SOCKS5 inbound (127.0.0.1:${XrayConfigGenerator.SOCKS_INBOUND_PORT}) never came up in time. Not starting the tunnel layer.")
+                    withContext(Dispatchers.Main) {
+                        VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                    }
+                    xrayProcess?.destroy()
+                    stopSelf()
+                    return@launch
+                }
+
+                if (fdNum != -1) {
+                    val hevConfigFile = File(cacheDir, "hev_tunnel.yml")
+                    HevSocks5Tunnel.writeConfig(hevConfigFile, XrayConfigGenerator.SOCKS_INBOUND_PORT)
+                    repository.log("HEV-TUNNEL", "INFO", "Handing TUN fd ($fdNum) to hev-socks5-tunnel, forwarding into 127.0.0.1:${XrayConfigGenerator.SOCKS_INBOUND_PORT}")
+
+                    hevTunnelThread = Thread({
+                        val exitCode = HevSocks5Tunnel.start(hevConfigFile.absolutePath, fdNum)
+                        repository.log("HEV-TUNNEL", if (exitCode == 0) "INFO" else "ERROR", "hev-socks5-tunnel loop exited with code $exitCode.")
+                    }, "hev-socks5-tunnel").apply {
+                        isDaemon = true
+                        start()
+                    }
+                } else {
+                    repository.log("HEV-TUNNEL", "ERROR", "No valid TUN fd available; traffic will not be routed through the tunnel.")
+                }
+
+                // Wait for Xray to exit (deliberately, via stopVpn(), or a crash) and
+                // reflect that accurately in the UI state instead of silently leaving
+                // it as CONNECTED while nothing is actually running.
                 val exitCode = try {
                     xrayProcess?.waitFor()
                 } catch (e: Exception) {
                     null
                 }
+                logJob.cancel()
 
                 if (coroutineContext.isActive && xrayProcess != null) {
                     // Still considered "running" from the service's perspective, meaning this
@@ -229,6 +264,9 @@ class V2RayVpnService : VpnService() {
                         "ERROR",
                         "Xray core process exited unexpectedly with code $exitCode. The tunnel is no longer active."
                     )
+                    // With Xray gone, the SOCKS5 backend the tunnel forwards into no
+                    // longer exists — stop it too instead of leaving it spinning.
+                    HevSocks5Tunnel.stop()
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                         VpnCoreManager.activeVpnCoreManager?.stopTracking()
@@ -241,6 +279,26 @@ class V2RayVpnService : VpnService() {
                 }
             }
         }
+    }
+
+    /**
+     * Polls 127.0.0.1:[port] until it accepts a TCP connection or [timeoutMs]
+     * elapses. Used to confirm Xray's SOCKS5 inbound is actually up before
+     * handing the TUN fd to hev-socks5-tunnel.
+     */
+    private suspend fun waitForSocksReady(port: Int, timeoutMs: Long = 5000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress("127.0.0.1", port), 300)
+                    return true
+                }
+            } catch (e: Exception) {
+                delay(150)
+            }
+        }
+        return false
     }
 
     /**
@@ -275,6 +333,18 @@ class V2RayVpnService : VpnService() {
             val db = V2RayDatabase.getDatabase(applicationContext)
             val repository = V2RayRepository(db)
             repository.log("VPN", "INFO", "Disconnecting client tunnel session...")
+
+            // Stop the tunnel loop first — it's the thing actively reading/writing
+            // the TUN fd, so it needs to unwind before we close that fd or kill the
+            // SOCKS5 backend it forwards into.
+            try {
+                HevSocks5Tunnel.stop()
+                hevTunnelThread?.join(2000)
+                hevTunnelThread = null
+                repository.log("HEV-TUNNEL", "SUCCESS", "Tunnel loop stopped.")
+            } catch (e: Exception) {
+                repository.log("HEV-TUNNEL", "ERROR", "Failed to stop tunnel loop cleanly: ${e.localizedMessage}")
+            }
 
             // Terminate background process
             try {
