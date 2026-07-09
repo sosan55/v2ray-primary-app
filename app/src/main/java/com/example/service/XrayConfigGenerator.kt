@@ -5,35 +5,22 @@ import java.io.File
 
 object XrayConfigGenerator {
 
-    fun generate(server: ServerEntity, fd: Int = -1, filesDir: File? = null): String {
+    // Xray-core has no "tun" inbound protocol — confirmed against the official
+    // Xray-core source and infra/conf parser (unknown config / exit code 23 if
+    // attempted). TUN termination is handled entirely outside Xray by
+    // hev-socks5-tunnel, which reads/writes the raw TUN fd and forwards traffic
+    // into the "socks-in" inbound below over loopback. Xray only ever sees
+    // ordinary SOCKS5 connections on 127.0.0.1:10808 — it has no awareness of
+    // the VPN/TUN layer at all.
+    const val SOCKS_INBOUND_PORT = 10808
+
+    fun generate(server: ServerEntity, filesDir: File? = null): String {
         val outbounds = when (server.type.uppercase()) {
             "VLESS" -> generateVlessOutbound(server)
             "VMESS" -> generateVmessOutbound(server)
             "TROJAN" -> generateTrojanOutbound(server)
             "SHADOWSOCKS" -> generateShadowsocksOutbound(server)
             else -> generateFreedomOutbound()
-        }
-
-        val tunInboundOpt = if (fd != -1) {
-            """,
-            {
-              "protocol": "tun",
-              "port": 0,
-              "settings": {
-                "stack": "gvisor",
-                "name": "tun0",
-                "mtu": 1400,
-                "fileDescriptor": $fd,
-                "file_descriptor": $fd,
-                "fd": $fd,
-                "sniffing": {
-                  "enabled": true,
-                  "destOverride": ["http", "tls", "quic"]
-                }
-              }
-            }"""
-        } else {
-            ""
         }
 
         // Safety verification: only append geoip strings if the geoip.dat file actually
@@ -86,7 +73,8 @@ object XrayConfigGenerator {
           $routingRules
           "inbounds": [
             {
-              "port": 10808,
+              "tag": "socks-in",
+              "port": $SOCKS_INBOUND_PORT,
               "listen": "127.0.0.1",
               "protocol": "socks",
               "settings": {
@@ -100,7 +88,6 @@ object XrayConfigGenerator {
               "protocol": "http",
               "settings": {}
             }
-            $tunInboundOpt
           ],
           "outbounds": [
             $outbounds,
