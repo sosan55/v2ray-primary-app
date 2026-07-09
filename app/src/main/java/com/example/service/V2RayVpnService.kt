@@ -277,8 +277,12 @@ class V2RayVpnService : VpnService() {
                         VpnCoreManager.activeVpnCoreManager?.stopTracking()
                     }
                 }
-            } catch (e: Exception) {
-                repository.log("XRAY-CORE", "ERROR", "Execution fail: ${e.localizedMessage}")
+            } catch (e: Throwable) {
+                // Catches Throwable, not just Exception, deliberately: a missing or
+                // mismatched libhev-socks5-tunnel.so throws UnsatisfiedLinkError, which
+                // is an Error (not an Exception) and would otherwise escape this block
+                // uncaught and crash the entire app instead of just failing the tunnel.
+                repository.log("XRAY-CORE", "ERROR", "Execution fail: ${e.localizedMessage ?: e.toString()}")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
