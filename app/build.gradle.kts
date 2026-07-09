@@ -13,6 +13,11 @@ android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
+  // Pinned so the CMake ExternalProject build of hev-socks5-tunnel (see
+  // src/main/cpp/CMakeLists.txt) uses a consistent, known-good NDK/toolchain
+  // instead of whatever happens to be default on a given machine or runner.
+  ndkVersion = "27.0.12077973"
+
   defaultConfig {
     applicationId = "com.aistudio.v2raydan.kqtxwp"
     minSdk = 24
@@ -21,6 +26,27 @@ android {
     versionName = "1.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Only building for arm64-v8a for now — matches the existing Xray-core
+    // download task, which only fetches the arm64-v8a binary. If you add
+    // other ABIs for Xray, add them here too or the app will crash on those
+    // devices when it can't find libhev-socks5-tunnel.so for their ABI.
+    ndk {
+      abiFilters += "arm64-v8a"
+    }
+
+    externalNativeBuild {
+      cmake {
+        cppFlags += ""
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
   }
 
   signingConfigs {
