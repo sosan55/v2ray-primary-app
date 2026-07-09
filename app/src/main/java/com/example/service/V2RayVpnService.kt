@@ -237,7 +237,12 @@ class V2RayVpnService : VpnService() {
 
                     hevTunnelThread = Thread({
                         val exitCode = HevSocks5Tunnel.start(hevConfigFile.absolutePath, fdNum)
-                        repository.log("HEV-TUNNEL", if (exitCode == 0) "INFO" else "ERROR", "hev-socks5-tunnel loop exited with code $exitCode.")
+                        // repository.log() is a suspend fun — this Thread lambda is a plain
+                        // Java thread, not a coroutine body, so the call has to be launched
+                        // into one rather than invoked directly.
+                        serviceScope.launch {
+                            repository.log("HEV-TUNNEL", if (exitCode == 0) "INFO" else "ERROR", "hev-socks5-tunnel loop exited with code $exitCode.")
+                        }
                     }, "hev-socks5-tunnel").apply {
                         isDaemon = true
                         start()
