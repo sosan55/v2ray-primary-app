@@ -116,6 +116,11 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
+  // FIX: androidx.activity.compose alone does not reliably bring in
+  // androidx.activity.result.contract.ActivityResultContracts / ActivityResultLauncher
+  // on this version catalog setup. MainActivity.kt uses these classes directly,
+  // so we add the base activity artifact explicitly.
+  implementation("androidx.activity:activity-ktx:1.10.1")
   // implementation(libs.androidx.camera.camera2)
   // implementation(libs.androidx.camera.core)
   // implementation(libs.androidx.camera.lifecycle)
@@ -225,4 +230,3 @@ tasks.register("downloadXrayCore") {
 tasks.named("preBuild") {
     dependsOn("downloadXrayCore")
 }
-
