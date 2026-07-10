@@ -47,12 +47,18 @@ ExternalProject_Add(
     # fix is to blank it out post-clone rather than fight its include path.
     PATCH_COMMAND bash -c "printf '' > '${HEV_TUNNEL_SRC_DIR}/src/hev-jni.c'"
     BUILD_IN_SOURCE 1
+    # -DFD_SET_DEFINED / -DSOCKLEN_T_DEFINED: without these, the bundled
+    # third-part/lwip's "unix" port headers (third-part/lwip/src/ports/unix/
+    # include/cc.h) try to typedef fd_set/socklen_t themselves, which
+    # conflicts with Android's bionic libc definitions ("typedef
+    # redefinition with different types"). Upstream's own Android.mk passes
+    # these same two flags for exactly this reason — mirroring them here.
     BUILD_COMMAND
         make static
              CC=${CMAKE_C_COMPILER}
              AR=${CMAKE_AR}
              STRIP=${CMAKE_STRIP}
-             "CFLAGS=--target=${CMAKE_C_COMPILER_TARGET} --sysroot=${CMAKE_SYSROOT} ${CMAKE_C_FLAGS} -fPIC -O2 -DNDEBUG"
+             "CFLAGS=--target=${CMAKE_C_COMPILER_TARGET} --sysroot=${CMAKE_SYSROOT} ${CMAKE_C_FLAGS} -fPIC -O2 -DNDEBUG -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED"
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
 )
