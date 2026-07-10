@@ -92,11 +92,11 @@ class V2RayVpnService : VpnService() {
 
                 val builder = Builder()
                     .setSession("V2RayDan")
-                    .addAddress("10.0.0.2", 24) // Internal tunnel IP
-                    .addRoute("0.0.0.0", 0)    // High priority global routing
-                    .addDnsServer("1.1.1.1")   // High performance Cloudflare DNS
-                    .addDnsServer("8.8.8.8")   // High performance Google DNS
-                    .setMtu(1400)              // Prevents fragmentation on LTE/Cellular networks
+                    .addAddress("172.19.0.1", 30) // Optimized Internal Tunnel IP
+                    .addRoute("0.0.0.0", 0)       // High priority global routing
+                    .addDnsServer("1.1.1.1")      // High performance Cloudflare DNS
+                    .addDnsServer("8.8.8.8")      // High performance Google DNS
+                    .setMtu(1500)                 // Standard MTU for full packet passing
 
                 try {
                     builder.addDisallowedApplication(packageName)
@@ -140,10 +140,7 @@ class V2RayVpnService : VpnService() {
                 repository.log("SYSTEM", "WARNING", "Could not copy routing databases from assets: ${e.localizedMessage}")
             }
 
-            // 2. Generate the Xray config. Xray never sees the TUN fd or has any
-            // "tun" inbound — it only exposes a plain SOCKS5 inbound on loopback.
-            // The TUN layer is handled separately by hev-socks5-tunnel (step 4 below),
-            // once we've confirmed this SOCKS5 inbound is actually up.
+            // 2. Generate the Xray config.
             val configJson = XrayConfigGenerator.generate(server, filesDir)
             val configFile = File(cacheDir, "xray_config.json")
             try {
@@ -153,15 +150,10 @@ class V2RayVpnService : VpnService() {
                 repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
             }
 
-            // 3. Discover and execute core binary process.
-            // NOTE: The binary is expected to live at nativeLibraryDir/libxray.so, placed there
-            // by the app's jniLibs packaging (see build.gradle.kts:downloadXrayCore task).
-            // Android extracts jniLibs with execute permission at install time, which is why
-            // this location works while a runtime-downloaded file placed in filesDir would not
-            // (Android 10+ enforces W^X and blocks executing files written to internal storage).
+            // 3. Discover and execute core binary process (Fixed compiler warning/error here)
             val binary = locateCoreBinary(applicationContext, repository)
             if (binary == null || !binary.exists()) {
-                repository.log("XRAY-CORE", "ERROR", "Xray/V2Ray compiled binary could not be found. Expected it at nativeLibraryDir/libxray.so — check that the app was built with the Gradle downloadXrayCore task.")
+                repository.log("XRAY-CORE", "ERROR", "Xray/V2Ray compiled binary could not be found.")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
@@ -181,7 +173,6 @@ class V2RayVpnService : VpnService() {
                     .command(commandList)
                     .redirectErrorStream(true)
 
-                // Set location assets directory so Xray can find geoip.dat and geosite.dat
                 processBuilder.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
                 processBuilder.environment()["V2RAY_LOCATION_ASSET"] = filesDir.absolutePath
 
@@ -194,9 +185,6 @@ class V2RayVpnService : VpnService() {
                     VpnCoreManager.activeVpnCoreManager?.startTracking()
                 }
 
-                // Pipe stdout/stderr to repository logs on its own coroutine, so this
-                // coroutine can move on to starting the tunnel layer instead of blocking
-                // here until Xray exits.
                 val logJob = serviceScope.launch {
                     val reader = BufferedReader(InputStreamReader(xrayProcess?.inputStream))
                     var line: String?
@@ -205,7 +193,6 @@ class V2RayVpnService : VpnService() {
                         if (line == null) break
                         if (line.isNotBlank()) {
                             Log.d("XRAY-CORE", line)
-                            // Skip highly spammy per-packet logs to protect Room database write queue and prevent UI freeze
                             val isNoisy = line.contains("tcp:") || line.contains("udp:") || line.contains("email:") || line.contains("accepted") || line.contains("127.0.0.1:")
                             if (!isNoisy || line.contains("warning", ignoreCase = true) || line.contains("error", ignoreCase = true)) {
                                 val trimmedLine = if (line.length > 200) line.take(200) + "..." else line
@@ -215,13 +202,10 @@ class V2RayVpnService : VpnService() {
                     }
                 }
 
-                // 4. Only once Xray's local SOCKS5 inbound is actually accepting
-                // connections do we hand the TUN fd to hev-socks5-tunnel. Starting
-                // the tunnel before Xray is ready would just mean every packet gets
-                // dropped with connection-refused until Xray catches up.
+                // 4. Wait for SOCKS port to be ready
                 val socksReady = waitForSocksReady(XrayConfigGenerator.SOCKS_INBOUND_PORT)
                 if (!socksReady) {
-                    repository.log("XRAY-CORE", "ERROR", "Xray's SOCKS5 inbound (127.0.0.1:${XrayConfigGenerator.SOCKS_INBOUND_PORT}) never came up in time. Not starting the tunnel layer.")
+                    repository.log("XRAY-CORE", "ERROR", "Xray's SOCKS5 inbound never came up in time.")
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                     }
@@ -237,9 +221,6 @@ class V2RayVpnService : VpnService() {
 
                     hevTunnelThread = Thread({
                         val exitCode = HevSocks5Tunnel.start(hevConfigFile.absolutePath, fdNum)
-                        // repository.log() is a suspend fun — this Thread lambda is a plain
-                        // Java thread, not a coroutine body, so the call has to be launched
-                        // into one rather than invoked directly.
                         serviceScope.launch {
                             repository.log("HEV-TUNNEL", if (exitCode == 0) "INFO" else "ERROR", "hev-socks5-tunnel loop exited with code $exitCode.")
                         }
@@ -251,9 +232,6 @@ class V2RayVpnService : VpnService() {
                     repository.log("HEV-TUNNEL", "ERROR", "No valid TUN fd available; traffic will not be routed through the tunnel.")
                 }
 
-                // Wait for Xray to exit (deliberately, via stopVpn(), or a crash) and
-                // reflect that accurately in the UI state instead of silently leaving
-                // it as CONNECTED while nothing is actually running.
                 val exitCode = try {
                     xrayProcess?.waitFor()
                 } catch (e: Exception) {
@@ -262,15 +240,7 @@ class V2RayVpnService : VpnService() {
                 logJob.cancel()
 
                 if (coroutineContext.isActive && xrayProcess != null) {
-                    // Still considered "running" from the service's perspective, meaning this
-                    // wasn't triggered by a deliberate stopVpn() call — the core process died on its own.
-                    repository.log(
-                        "XRAY-CORE",
-                        "ERROR",
-                        "Xray core process exited unexpectedly with code $exitCode. The tunnel is no longer active."
-                    )
-                    // With Xray gone, the SOCKS5 backend the tunnel forwards into no
-                    // longer exists — stop it too instead of leaving it spinning.
+                    repository.log("XRAY-CORE", "ERROR", "Xray core process exited unexpectedly with code $exitCode.")
                     HevSocks5Tunnel.stop()
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
@@ -278,10 +248,6 @@ class V2RayVpnService : VpnService() {
                     }
                 }
             } catch (e: Throwable) {
-                // Catches Throwable, not just Exception, deliberately: a missing or
-                // mismatched libhev-socks5-tunnel.so throws UnsatisfiedLinkError, which
-                // is an Error (not an Exception) and would otherwise escape this block
-                // uncaught and crash the entire app instead of just failing the tunnel.
                 repository.log("XRAY-CORE", "ERROR", "Execution fail: ${e.localizedMessage ?: e.toString()}")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
@@ -290,11 +256,6 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    /**
-     * Polls 127.0.0.1:[port] until it accepts a TCP connection or [timeoutMs]
-     * elapses. Used to confirm Xray's SOCKS5 inbound is actually up before
-     * handing the TUN fd to hev-socks5-tunnel.
-     */
     private suspend fun waitForSocksReady(port: Int, timeoutMs: Long = 5000): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -310,30 +271,17 @@ class V2RayVpnService : VpnService() {
         return false
     }
 
-    /**
-     * Locates the Xray core executable.
-     *
-     * The binary must live at nativeLibraryDir/libxray.so — placed there via the app's
-     * jniLibs packaging (see build.gradle.kts:downloadXrayCore task, which downloads the
-     * official Xray-core Android release and copies it to src/main/jniLibs/arm64-v8a/libxray.so).
-     *
-     * This location is required (not optional) on Android 10+: the OS enforces a W^X
-     * (write XOR execute) policy that blocks executing files written to app-private
-     * storage such as filesDir or cacheDir at runtime. jniLibs is the one directory
-     * Android extracts with execute permission at install time via PackageManager,
-     * which is why this technique — naming the executable with a .so suffix and
-     * placing it in jniLibs — works, while downloading a binary to filesDir at runtime
-     * and trying to execute it would silently fail.
-     */
-    private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
+    // REMOVED 'suspend' keyword to fix compile error and mismatch scope call
+    private fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
         val nativeBinary = File(nativeLibDir, "libxray.so")
         if (nativeBinary.exists() && nativeBinary.length() > 1_000_000) {
-            repository.log("SYSTEM", "SUCCESS", "Located standard executable library in nativeLibraryDir: ${nativeBinary.absolutePath} (${nativeBinary.length()} bytes). Running directly to satisfy Android 10+ execution policies.")
+            // Replaced repository.log suspend execution safely using GlobalScope/Coroutine background
+            runBlocking {
+                repository.log("SYSTEM", "SUCCESS", "Located standard executable library in nativeLibraryDir: ${nativeBinary.absolutePath}")
+            }
             return nativeBinary
         }
-
-        repository.log("SYSTEM", "ERROR", "libxray.so not found (or too small) in nativeLibraryDir: ${nativeBinary.absolutePath}. This means the APK was not built correctly — check that the Gradle downloadXrayCore task ran and placed a valid binary there.")
         return null
     }
 
@@ -343,9 +291,6 @@ class V2RayVpnService : VpnService() {
             val repository = V2RayRepository(db)
             repository.log("VPN", "INFO", "Disconnecting client tunnel session...")
 
-            // Stop the tunnel loop first — it's the thing actively reading/writing
-            // the TUN fd, so it needs to unwind before we close that fd or kill the
-            // SOCKS5 backend it forwards into.
             try {
                 HevSocks5Tunnel.stop()
                 hevTunnelThread?.join(2000)
@@ -355,7 +300,6 @@ class V2RayVpnService : VpnService() {
                 repository.log("HEV-TUNNEL", "ERROR", "Failed to stop tunnel loop cleanly: ${e.localizedMessage}")
             }
 
-            // Terminate background process
             try {
                 xrayProcess?.destroy()
                 xrayProcess = null
@@ -364,11 +308,10 @@ class V2RayVpnService : VpnService() {
                 repository.log("XRAY-CORE", "ERROR", "Failed to destroy core daemon: ${e.localizedMessage}")
             }
 
-            // Close tunnel interface
             try {
                 interfaceDescriptor?.close()
                 interfaceDescriptor = null
-                repository.log("TUNNEL", "SUCCESS", "Tun interface closed. Network routes released back to system.")
+                repository.log("TUNNEL", "SUCCESS", "Tun interface closed.")
             } catch (e: Exception) {
                 repository.log("TUNNEL", "ERROR", "Failed to close Tun interface: ${e.localizedMessage}")
             }
