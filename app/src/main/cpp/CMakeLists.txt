@@ -1,103 +1,67 @@
-/*
- * jni_bridge.c
- *
- * Thin JNI glue between:
- *   Kotlin: com.example.service.HevSocks5Tunnel
- *           external fun nativeMainFromFile(configPath: String, tunFd: Int): Int
- *           external fun nativeQuit()
- * and:
- *   C:      hev-socks5-tunnel's public API (src/hev-main.h in
- *           https://github.com/heiher/hev-socks5-tunnel)
- *
- * WHY THIS FILE EXISTS (read this before touching it):
- * The upstream hev-socks5-tunnel repo ships its OWN Android JNI wrapper
- * (built via its Android.mk), but that wrapper's exported symbol is
- * Java_TProxyService_StartService — i.e. it assumes a Java/Kotlin class
- * literally named "TProxyService" in the default package. Our app's class
- * is com.example.service.HevSocks5Tunnel, so that prebuilt wrapper's
- * exported symbols will NEVER match ours, no matter how the .so is placed
- * in jniLibs/. That mismatch is the root cause of the UnsatisfiedLinkError
- * / native crash we chased earlier.
- *
- * The fix: don't use upstream's JNI wrapper at all. Link directly against
- * hev-socks5-tunnel's underlying C library (built as a static lib via its
- * own Makefile — see CMakeLists.txt) and write our own tiny JNI layer
- * here, with symbol names generated for OUR class's package/name.
- *
- * JNI symbol naming reference: Java_<package_with_underscores>_<Class>_<method>
- *   com.example.service.HevSocks5Tunnel.nativeMainFromFile
- *     -> Java_com_example_service_HevSocks5Tunnel_nativeMainFromFile
- *   com.example.service.HevSocks5Tunnel.nativeQuit
- *     -> Java_com_example_service_HevSocks5Tunnel_nativeQuit
- *
- * If the Kotlin object is ever renamed or moved to a different package,
- * BOTH of the exported function names below must be renamed to match, or
- * you're back to square one with UnsatisfiedLinkError.
- */
+# app/src/main/cpp/CMakeLists.txt
+#
+# Builds libhev-socks5-tunnel.so, the native library that
+# com.example.service.HevSocks5Tunnel loads via System.loadLibrary("hev-socks5-tunnel").
+#
+# Strategy (two stages):
+#   1. Pull hev-socks5-tunnel's C sources via ExternalProject_Add and build
+#      them as a static library using ITS OWN Makefile (not ndk-build, not
+#      its bundled Android JNI wrapper — see jni_bridge.c for why).
+#   2. Compile our own jni_bridge.c and link it against that static library,
+#      producing the final .so with symbol names matching our Kotlin class.
+#
+# Requires NDK's `make` to be on PATH during the Gradle build (bundled with
+# the NDK toolchain on all supported host OSes) and network access on first
+# configure (to git-clone the upstream source). If you'd rather pin an exact
+# offline copy of the source instead of cloning at build time, replace the
+# GIT_REPOSITORY/GIT_TAG below with SOURCE_DIR pointing at a vendored copy.
 
-#include <jni.h>
-#include <android/log.h>
+cmake_minimum_required(VERSION 3.22.1)
+project(hev_socks5_tunnel_jni C)
 
-#define LOG_TAG "jni_bridge"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+include(ExternalProject)
 
-/*
- * Declared (not defined) here rather than #include-ing hev-socks5-tunnel's
- * own src/hev-main.h, because that header lives inside the ExternalProject
- * checkout, which does not exist yet at CMake *configure* time on a clean
- * build (only after the external build step runs). Declaring the exact
- * signatures ourselves avoids an include-path chicken-and-egg problem.
- *
- * Signatures verified against upstream src/hev-main.h as of this writing:
- *   int  hev_socks5_tunnel_main_from_file (const char *config_path, int tun_fd);
- *   void hev_socks5_tunnel_quit (void);
- * If you bump the pinned hev-socks5-tunnel version/commit in CMakeLists.txt,
- * re-check these signatures against that tag's src/hev-main.h before relying
- * on this file again.
- */
-extern int hev_socks5_tunnel_main_from_file(const char *config_path, int tun_fd);
-extern void hev_socks5_tunnel_quit(void);
+set(HEV_TUNNEL_SRC_DIR ${CMAKE_CURRENT_BINARY_DIR}/hev-socks5-tunnel-src)
 
-JNIEXPORT jint JNICALL
-Java_com_example_service_HevSocks5Tunnel_nativeMainFromFile(
-    JNIEnv *env, jobject thiz, jstring configPath, jint tunFd)
-{
-    (void) thiz;
+# Pin to a known-good tag rather than a floating branch, so a fresh build
+# a year from now doesn't silently pull in unrelated upstream changes.
+# Bump deliberately and re-verify src/hev-main.h against jni_bridge.c's
+# extern declarations whenever you change this.
+set(HEV_TUNNEL_GIT_TAG "2.15.0")
 
-    if (configPath == NULL) {
-        LOGE("nativeMainFromFile: configPath is null");
-        return -1;
-    }
+ExternalProject_Add(
+    hev_socks5_tunnel_upstream
+    GIT_REPOSITORY https://github.com/heiher/hev-socks5-tunnel.git
+    GIT_TAG        ${HEV_TUNNEL_GIT_TAG}
+    GIT_SUBMODULES_RECURSE ON
+    SOURCE_DIR     ${HEV_TUNNEL_SRC_DIR}
+    CONFIGURE_COMMAND ""
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND
+        make static
+             CC=${CMAKE_C_COMPILER}
+             AR=${CMAKE_AR}
+             STRIP=${CMAKE_STRIP}
+             "CFLAGS=${CMAKE_C_FLAGS} -fPIC -O2 -DNDEBUG"
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
+)
 
-    const char *path = (*env)->GetStringUTFChars(env, configPath, NULL);
-    if (path == NULL) {
-        /* Out of memory inside the JVM; an exception is already pending. */
-        LOGE("nativeMainFromFile: GetStringUTFChars failed");
-        return -1;
-    }
+add_library(hev-socks5-tunnel-core STATIC IMPORTED)
+set_target_properties(hev-socks5-tunnel-core PROPERTIES
+    IMPORTED_LOCATION ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
+)
+add_dependencies(hev-socks5-tunnel-core hev_socks5_tunnel_upstream)
 
-    LOGI("Starting hev-socks5-tunnel: config_path=%s tun_fd=%d", path, (int) tunFd);
+# Final artifact: this name (without lib prefix/.so suffix) must match
+# System.loadLibrary("hev-socks5-tunnel") in HevSocks5Tunnel.kt exactly.
+add_library(hev-socks5-tunnel SHARED
+    jni_bridge.c
+)
 
-    /* Blocks until nativeQuit()/hev_socks5_tunnel_quit() is called, the TUN
-     * fd is closed, or an internal error occurs. Runs on whatever thread
-     * called us — the Kotlin side is responsible for using a dedicated
-     * Thread, not a shared coroutine dispatcher (see HevSocks5Tunnel.kt). */
-    int ret = hev_socks5_tunnel_main_from_file(path, (int) tunFd);
+find_library(log-lib log)
 
-    LOGI("hev-socks5-tunnel event loop exited with code %d", ret);
-
-    (*env)->ReleaseStringUTFChars(env, configPath, path);
-
-    return (jint) ret;
-}
-
-JNIEXPORT void JNICALL
-Java_com_example_service_HevSocks5Tunnel_nativeQuit(JNIEnv *env, jobject thiz)
-{
-    (void) env;
-    (void) thiz;
-
-    LOGI("Requesting hev-socks5-tunnel shutdown");
-    hev_socks5_tunnel_quit();
-}
+target_link_libraries(hev-socks5-tunnel
+    hev-socks5-tunnel-core
+    ${log-lib}
+)
