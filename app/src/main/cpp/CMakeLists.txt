@@ -60,14 +60,44 @@ ExternalProject_Add(
              STRIP=${CMAKE_STRIP}
              "CFLAGS=--target=${CMAKE_C_COMPILER_TARGET} --sysroot=${CMAKE_SYSROOT} ${CMAKE_C_FLAGS} -fPIC -O2 -DNDEBUG -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED"
     INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
+    BUILD_BYPRODUCTS
+        ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
+        ${HEV_TUNNEL_SRC_DIR}/third-part/lwip/bin/liblwip.a
+        ${HEV_TUNNEL_SRC_DIR}/third-part/yaml/bin/libyaml.a
+        ${HEV_TUNNEL_SRC_DIR}/third-part/hev-task-system/bin/libhev-task-system.a
 )
 
+# "make static" only produces libhev-socks5-tunnel.a itself — its
+# dependencies (lwip for packet processing, yaml for config parsing,
+# hev-task-system for the cooperative task scheduler) are built as
+# SEPARATE static archives under their own third-part/*/bin/ directories
+# and are NOT bundled into libhev-socks5-tunnel.a automatically. Upstream's
+# own iOS build instructions merge all four with `libtool -static` for
+# exactly this reason. We don't need to merge them into one archive; it's
+# enough to link against all four when building our final .so below.
 add_library(hev-socks5-tunnel-core STATIC IMPORTED)
 set_target_properties(hev-socks5-tunnel-core PROPERTIES
     IMPORTED_LOCATION ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
 )
 add_dependencies(hev-socks5-tunnel-core hev_socks5_tunnel_upstream)
+
+add_library(hev-socks5-tunnel-lwip STATIC IMPORTED)
+set_target_properties(hev-socks5-tunnel-lwip PROPERTIES
+    IMPORTED_LOCATION ${HEV_TUNNEL_SRC_DIR}/third-part/lwip/bin/liblwip.a
+)
+add_dependencies(hev-socks5-tunnel-lwip hev_socks5_tunnel_upstream)
+
+add_library(hev-socks5-tunnel-yaml STATIC IMPORTED)
+set_target_properties(hev-socks5-tunnel-yaml PROPERTIES
+    IMPORTED_LOCATION ${HEV_TUNNEL_SRC_DIR}/third-part/yaml/bin/libyaml.a
+)
+add_dependencies(hev-socks5-tunnel-yaml hev_socks5_tunnel_upstream)
+
+add_library(hev-socks5-tunnel-task STATIC IMPORTED)
+set_target_properties(hev-socks5-tunnel-task PROPERTIES
+    IMPORTED_LOCATION ${HEV_TUNNEL_SRC_DIR}/third-part/hev-task-system/bin/libhev-task-system.a
+)
+add_dependencies(hev-socks5-tunnel-task hev_socks5_tunnel_upstream)
 
 # Final artifact: this name (without lib prefix/.so suffix) must match
 # System.loadLibrary("hev-socks5-tunnel") in HevSocks5Tunnel.kt exactly.
@@ -78,6 +108,11 @@ add_library(hev-socks5-tunnel SHARED
 find_library(log-lib log)
 
 target_link_libraries(hev-socks5-tunnel
+    -Wl,--start-group
     hev-socks5-tunnel-core
+    hev-socks5-tunnel-lwip
+    hev-socks5-tunnel-yaml
+    hev-socks5-tunnel-task
+    -Wl,--end-group
     ${log-lib}
 )
