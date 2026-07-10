@@ -52,7 +52,7 @@ ExternalProject_Add(
              CC=${CMAKE_C_COMPILER}
              AR=${CMAKE_AR}
              STRIP=${CMAKE_STRIP}
-             "CFLAGS=${CMAKE_C_FLAGS} -fPIC -O2 -DNDEBUG"
+             "CFLAGS=--target=${CMAKE_C_COMPILER_TARGET} --sysroot=${CMAKE_SYSROOT} ${CMAKE_C_FLAGS} -fPIC -O2 -DNDEBUG"
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${HEV_TUNNEL_SRC_DIR}/bin/libhev-socks5-tunnel.a
 )
