@@ -36,6 +36,16 @@ ExternalProject_Add(
     GIT_SUBMODULES_RECURSE ON
     SOURCE_DIR     ${HEV_TUNNEL_SRC_DIR}
     CONFIGURE_COMMAND ""
+    # Upstream's own Makefile detects the Android target (from -DANDROID in
+    # CFLAGS, added automatically by the NDK's CMake toolchain file) and
+    # tries to also compile src/hev-jni.c — THEIR bundled JNI wrapper
+    # (Java_TProxyService_StartService, see jni_bridge.c's header comment
+    # for why we don't use it). That file expects <jni.h> to be reachable
+    # the way `ndk-build`/Android.mk sets it up, which plain `make` here
+    # does not replicate, so it fails with "fatal error: 'jni.h' file not
+    # found". We don't link against anything in that file, so the simplest
+    # fix is to blank it out post-clone rather than fight its include path.
+    PATCH_COMMAND bash -c "printf '' > '${HEV_TUNNEL_SRC_DIR}/src/hev-jni.c'"
     BUILD_IN_SOURCE 1
     BUILD_COMMAND
         make static
