@@ -1,3 +1,4 @@
+cat << 'EOF' > XrayConfigGenerator.kt
 package com.example.service
 
 import com.example.data.ServerEntity
@@ -60,6 +61,11 @@ object XrayConfigGenerator {
                   "fe80::/10"
                   ${if (hasGeoip) ",\"geoip:private\",\"geoip:ir\"" else ""}
                 ]
+              },
+              {
+                "type": "field",
+                "outboundTag": "proxy",
+                "network": "tcp,udp"
               }
             ]
           },
@@ -80,13 +86,21 @@ object XrayConfigGenerator {
               "settings": {
                 "auth": "noauth",
                 "udp": true
+              },
+              "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
               }
             },
             {
               "port": 10809,
               "listen": "127.0.0.1",
               "protocol": "http",
-              "settings": {}
+              "settings": {},
+              "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+              }
             }
           ],
           "outbounds": [
@@ -281,3 +295,4 @@ object XrayConfigGenerator {
         """
     }
 }
+EOF
