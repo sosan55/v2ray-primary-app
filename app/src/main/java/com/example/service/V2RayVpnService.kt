@@ -15,11 +15,14 @@ import com.example.data.V2RayDatabase
 import com.example.data.V2RayRepository
 import com.example.data.ServerEntity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicBoolean
 
 class V2RayVpnService : VpnService() {
 
@@ -28,6 +31,19 @@ class V2RayVpnService : VpnService() {
     private var hevTunnelThread: Thread? = null
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+
+    // --- Cleanup synchronization -------------------------------------------------
+    // The old bug: stopVpn() (triggered by ACTION_STOP / onDestroy) and the
+    // post-waitFor() cleanup block inside startVpn() (triggered when the xray
+    // process dies/gets destroyed) could BOTH run their teardown logic at the
+    // same time, on two different coroutines. Both paths called
+    // HevSocks5Tunnel.stop() and touched xrayProcess/interfaceDescriptor
+    // concurrently -> double-free / use-after-close in the native JNI layer ->
+    // SIGSEGV. cleanupMutex + cleanupDone make teardown idempotent and
+    // serialized: whichever caller gets there first does the real cleanup;
+    // every other caller just waits for it to finish and then no-ops.
+    private val cleanupMutex = Mutex()
+    private val cleanupDone = AtomicBoolean(false)
 
     companion object {
         const val ACTION_START = "com.example.service.START"
@@ -47,6 +63,11 @@ class V2RayVpnService : VpnService() {
     }
 
     private fun startVpn() {
+        // Reset teardown state for this new session — this service instance
+        // may be reused for multiple connect/disconnect cycles without
+        // onDestroy() being called in between.
+        cleanupDone.set(false)
+
         createNotificationChannel()
         val intent = Intent(this, MainActivity::class.java)
 
@@ -68,21 +89,7 @@ class V2RayVpnService : VpnService() {
             .setOngoing(true)
             .build()
 
-        try {
-            startForeground(NOTIFICATION_ID, notification)
-        } catch (e: Exception) {
-            Log.e("VPN", "startForeground failed: ${e.localizedMessage}")
-            serviceScope.launch {
-                val db = V2RayDatabase.getDatabase(applicationContext)
-                val repository = V2RayRepository(db)
-                repository.log("VPN", "ERROR", "Failed to start foreground service: ${e.localizedMessage}")
-                withContext(Dispatchers.Main) {
-                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
-                }
-            }
-            stopSelf()
-            return
-        }
+        startForeground(NOTIFICATION_ID, notification)
 
         serviceScope.launch {
             val db = V2RayDatabase.getDatabase(applicationContext)
@@ -158,7 +165,6 @@ class V2RayVpnService : VpnService() {
                 repository.log("CONFIG", "ERROR", "Failed to cache configuration: ${e.localizedMessage}")
             }
 
-            // فراخوانی ایمن کدهای تعلیق‌پذیر در بدنه اصلی کوروتین اسکوپ سرویس
             val binary = locateCoreBinary(applicationContext, repository)
             if (binary == null || !binary.exists()) {
                 repository.log("XRAY-CORE", "ERROR", "Binary execute target missing.")
@@ -211,7 +217,8 @@ class V2RayVpnService : VpnService() {
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                     }
-                    xrayProcess?.destroy()
+                    logJob.cancel()
+                    performCleanup(repository)
                     stopSelf()
                     return@launch
                 }
@@ -231,6 +238,12 @@ class V2RayVpnService : VpnService() {
                     }
                 }
 
+                // NOTE: this call blocks the coroutine's underlying thread until
+                // the xray process exits *for any reason* — either it crashed on
+                // its own, or stopVpn() elsewhere called xrayProcess?.destroy().
+                // Either way, once we're past this line the process is gone and
+                // we must run cleanup exactly once, coordinated with whatever
+                // else might be tearing things down concurrently.
                 val exitCode = try {
                     xrayProcess?.waitFor()
                 } catch (e: Exception) {
@@ -238,33 +251,18 @@ class V2RayVpnService : VpnService() {
                 }
                 logJob.cancel()
 
-                if (coroutineContext.isActive && xrayProcess != null) {
+                if (coroutineContext.isActive) {
                     repository.log("XRAY-CORE", "ERROR", "Core exited code: $exitCode.")
-
-                    // پاکسازی کامل: بدون این‌ها TUN باز می‌مونه و کل ترافیک گوشی
-                    // تو یه سیاه‌چاله گم می‌شه چون نه core زنده‌ست نه hev-tunnel
-                    HevSocks5Tunnel.stop()
-                    hevTunnelThread?.join(2000)
-                    hevTunnelThread = null
-                    xrayProcess = null
-
-                    try {
-                        interfaceDescriptor?.close()
-                    } catch (e: Exception) {
-                        repository.log("INTERFACE", "WARNING", "Close error on crash cleanup: ${e.localizedMessage}")
-                    }
-                    interfaceDescriptor = null
-
+                    performCleanup(repository)
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                         VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
                         VpnCoreManager.activeVpnCoreManager?.stopTracking()
                     }
-
-                    stopSelf()
                 }
             } catch (e: Throwable) {
                 repository.log("XRAY-CORE", "ERROR", "Exception execution: ${e.localizedMessage ?: e.toString()}")
+                performCleanup(repository)
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                 }
@@ -287,7 +285,6 @@ class V2RayVpnService : VpnService() {
         return false
     }
 
-    // اصلاح ساختار تابع با کلمه کلیدی suspend بدون مسدودسازی ترد اصلی برای ذخیره لاگ
     private suspend fun locateCoreBinary(context: Context, repository: V2RayRepository): File? {
         return withContext(Dispatchers.IO) {
             val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
@@ -301,29 +298,58 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    private fun stopVpn() {
-        serviceScope.launch {
+    /**
+     * The single, idempotent teardown path. Whether it's called from the
+     * user hitting "disconnect" (stopVpn) or from the xray process dying on
+     * its own (startVpn's post-waitFor block), it's safe to call this from
+     * multiple coroutines concurrently: the mutex serializes callers, and
+     * cleanupDone ensures only the first caller through actually touches the
+     * native tunnel / process / fd. Everyone else just waits and returns.
+     */
+    private suspend fun performCleanup(repository: V2RayRepository? = null) {
+        cleanupMutex.withLock {
+            if (cleanupDone.getAndSet(true)) {
+                // Someone else already ran (or is running) real cleanup while
+                // we were waiting on the mutex — nothing left to do.
+                return@withLock
+            }
+
             try {
                 HevSocks5Tunnel.stop()
                 hevTunnelThread?.join(2000)
-                hevTunnelThread = null
             } catch (e: Exception) {
                 Log.e("TUNNEL", "Stop error: ${e.localizedMessage}")
+                repository?.log("TUNNEL", "ERROR", "Stop error: ${e.localizedMessage}")
+            } finally {
+                hevTunnelThread = null
             }
 
             try {
                 xrayProcess?.destroy()
-                xrayProcess = null
             } catch (e: Exception) {
                 Log.e("CORE", "Destroy error: ${e.localizedMessage}")
+                repository?.log("CORE", "ERROR", "Destroy error: ${e.localizedMessage}")
+            } finally {
+                xrayProcess = null
             }
 
             try {
                 interfaceDescriptor?.close()
-                interfaceDescriptor = null
             } catch (e: Exception) {
                 Log.e("INTERFACE", "Close error: ${e.localizedMessage}")
+                repository?.log("INTERFACE", "ERROR", "Close error: ${e.localizedMessage}")
+            } finally {
+                interfaceDescriptor = null
             }
+        }
+    }
+
+    private fun stopVpn() {
+        serviceScope.launch {
+            val db = V2RayDatabase.getDatabase(applicationContext)
+            val repository = V2RayRepository(db)
+
+            performCleanup(repository)
 
             withContext(Dispatchers.Main) {
                 VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.DISCONNECTED)
@@ -346,7 +372,13 @@ class V2RayVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopVpn()
+        // Fire-and-forget cleanup on service teardown. If a stopVpn()/
+        // performCleanup() call is already in flight from ACTION_STOP, this
+        // one will just block on the mutex, see cleanupDone == true, and
+        // return immediately — no double teardown.
+        runBlocking {
+            performCleanup()
+        }
         serviceJob.cancel()
         super.onDestroy()
     }
