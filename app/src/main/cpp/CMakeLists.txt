@@ -29,6 +29,25 @@ set(HEV_TUNNEL_SRC_DIR ${CMAKE_CURRENT_BINARY_DIR}/hev-socks5-tunnel-src)
 # extern declarations whenever you change this.
 set(HEV_TUNNEL_GIT_TAG "2.15.0")
 
+# NDK ships its own `make` under prebuilt/<host-tag>/bin, but it is NOT
+# automatically added to PATH just because CMake/ninja can find the NDK
+# toolchain — only `cmake`/`ninja` themselves get resolved that way. On a
+# minimal CI runner with no system-wide `make` installed, a bare `make`
+# command below would fail with "command not found". Resolve it explicitly
+# from the NDK first, and only fall back to whatever `make` is on PATH.
+find_program(MAKE_EXECUTABLE
+    NAMES make
+    PATHS ${ANDROID_NDK}/prebuilt/${ANDROID_HOST_TAG}/bin
+          ${CMAKE_ANDROID_NDK}/prebuilt/${ANDROID_HOST_TAG}/bin
+    NO_DEFAULT_PATH
+)
+if(NOT MAKE_EXECUTABLE)
+    find_program(MAKE_EXECUTABLE make)
+endif()
+if(NOT MAKE_EXECUTABLE)
+    message(FATAL_ERROR "hev-socks5-tunnel build requires `make` but none was found (checked NDK prebuilt dir and PATH).")
+endif()
+
 ExternalProject_Add(
     hev_socks5_tunnel_upstream
     GIT_REPOSITORY https://github.com/heiher/hev-socks5-tunnel.git
@@ -54,7 +73,7 @@ ExternalProject_Add(
     # redefinition with different types"). Upstream's own Android.mk passes
     # these same two flags for exactly this reason — mirroring them here.
     BUILD_COMMAND
-        make static
+        ${MAKE_EXECUTABLE} static
              CC=${CMAKE_C_COMPILER}
              AR=${CMAKE_AR}
              STRIP=${CMAKE_STRIP}
