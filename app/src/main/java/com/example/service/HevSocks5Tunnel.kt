@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.util.Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -17,8 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * REQUIRES: libhev-socks5-tunnel.so present under
  * src/main/jniLibs/<abi>/ for every ABI you ship (arm64-v8a at minimum).
- * See the Gradle `downloadHevSocks5Tunnel` task (to be added to
- * build.gradle.kts) for how that .so gets there.
+ * This is built automatically by CMake (see app/src/main/cpp/CMakeLists.txt)
+ * during the Android build process.
  */
 object HevSocks5Tunnel {
 
@@ -41,13 +42,15 @@ object HevSocks5Tunnel {
         try {
             System.loadLibrary("hev-socks5-tunnel")
             libraryLoaded = true
+            Log.d("HEV-TUNNEL", "✓ libhev-socks5-tunnel.so loaded successfully")
         } catch (e: UnsatisfiedLinkError) {
             // Most likely cause: libhev-socks5-tunnel.so isn't present under
-            // jniLibs/<abi>/ for this ABI — e.g. the Gradle task that downloads
-            // and places it hasn't run, or ran for the wrong ABI. Swallow it here
-            // so referencing this object doesn't crash the whole app; start()
-            // will instead throw a clear, catchable IllegalStateException below.
+            // jniLibs/<abi>/ for this ABI — e.g. the CMake build hasn't run
+            // or failed, or the library wasn't compiled for this device's ABI.
+            // Swallow it here so referencing this object doesn't crash the whole app;
+            // start() will instead throw a clear, catchable IllegalStateException below.
             libraryLoadError = e
+            Log.e("HEV-TUNNEL", "✗ Failed to load libhev-socks5-tunnel.so: ${e.message}")
         }
     }
 
@@ -71,18 +74,23 @@ object HevSocks5Tunnel {
      */
     fun start(configPath: String, tunFd: Int): Int {
         if (!libraryLoaded) {
-            throw IllegalStateException(
-                "libhev-socks5-tunnel.so failed to load (${libraryLoadError?.message}). " +
-                "Check that it's bundled under jniLibs/<abi>/ for this device's ABI.",
-                libraryLoadError
-            )
+            val errorMsg = "libhev-socks5-tunnel.so failed to load (${libraryLoadError?.message}). " +
+                "Check that it's bundled under jniLibs/<abi>/ for this device's ABI. " +
+                "The library should be built automatically by CMake (app/src/main/cpp/CMakeLists.txt). " +
+                "If this error persists, try: 1) Clean rebuild (./gradlew clean build), " +
+                "2) Verify NDK is installed (ndkVersion 27.0.12077973), " +
+                "3) Check that CMake build succeeded in logs."
+            Log.e("HEV-TUNNEL", errorMsg)
+            throw IllegalStateException(errorMsg, libraryLoadError)
         }
         stopRequested.set(false)
         isRunning.set(true)
+        Log.i("HEV-TUNNEL", "Starting tunnel: config=$configPath tunFd=$tunFd")
         return try {
             nativeMainFromFile(configPath, tunFd)
         } finally {
             isRunning.set(false)
+            Log.i("HEV-TUNNEL", "Tunnel event loop exited")
         }
     }
 
@@ -94,6 +102,7 @@ object HevSocks5Tunnel {
      */
     fun stop() {
         if (isRunning.get() && stopRequested.compareAndSet(false, true)) {
+            Log.i("HEV-TUNNEL", "Requesting tunnel shutdown")
             nativeQuit()
         }
     }
@@ -124,6 +133,7 @@ object HevSocks5Tunnel {
               task-stack-size: 20480
             """.trimIndent()
         )
+        Log.d("HEV-TUNNEL", "Config written: ${destFile.absolutePath}")
         return destFile
     }
 }
