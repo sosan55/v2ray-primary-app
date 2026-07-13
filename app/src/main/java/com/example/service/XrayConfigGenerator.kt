@@ -1,4 +1,3 @@
-cat << 'EOF' > XrayConfigGenerator.kt
 package com.example.service
 
 import com.example.data.ServerEntity
@@ -295,4 +294,3 @@ object XrayConfigGenerator {
         """
     }
 }
-EOF
