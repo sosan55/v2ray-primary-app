@@ -68,7 +68,21 @@ class V2RayVpnService : VpnService() {
             .setOngoing(true)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.e("VPN", "startForeground failed: ${e.localizedMessage}")
+            serviceScope.launch {
+                val db = V2RayDatabase.getDatabase(applicationContext)
+                val repository = V2RayRepository(db)
+                repository.log("VPN", "ERROR", "Failed to start foreground service: ${e.localizedMessage}")
+                withContext(Dispatchers.Main) {
+                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                }
+            }
+            stopSelf()
+            return
+        }
 
         serviceScope.launch {
             val db = V2RayDatabase.getDatabase(applicationContext)
