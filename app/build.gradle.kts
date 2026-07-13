@@ -124,6 +124,8 @@ android {
       useLegacyPackaging = true
       keepDebugSymbols.add("**/libxray.so")
       doNotStrip.add("**/libxray.so")
+      keepDebugSymbols.add("**/libhev-socks5-tunnel.so")
+      doNotStrip.add("**/libhev-socks5-tunnel.so")
     }
   }
 }
