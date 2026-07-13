@@ -1,6 +1,7 @@
 package com.example.service
 
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Thin Kotlin wrapper around the native hev-socks5-tunnel library
@@ -21,8 +22,15 @@ import java.io.File
  */
 object HevSocks5Tunnel {
 
-    @Volatile
-    private var isRunning = false
+    // Was a plain @Volatile Boolean before. That's fine for visibility but
+    // gives no atomicity: two threads could both read isRunning == true and
+    // both proceed to call nativeQuit(), which is exactly the double-call
+    // that was corrupting native state and crashing the process. isRunning
+    // now also doubles as "is a session currently open", and stopRequested
+    // guarantees nativeQuit() fires at most once per start()/stop() cycle
+    // even under concurrent callers.
+    private val isRunning = AtomicBoolean(false)
+    private val stopRequested = AtomicBoolean(false)
 
     @Volatile
     private var libraryLoaded = false
@@ -69,22 +77,28 @@ object HevSocks5Tunnel {
                 libraryLoadError
             )
         }
-        isRunning = true
+        stopRequested.set(false)
+        isRunning.set(true)
         return try {
             nativeMainFromFile(configPath, tunFd)
         } finally {
-            isRunning = false
+            isRunning.set(false)
         }
     }
 
-    /** Requests a clean shutdown of the tunnel loop, if one is running. */
+    /**
+     * Requests a clean shutdown of the tunnel loop, if one is running.
+     * Safe to call multiple times and/or concurrently from multiple
+     * threads/coroutines — only the first call in a given session actually
+     * reaches the native layer; every other call becomes a no-op.
+     */
     fun stop() {
-        if (isRunning) {
+        if (isRunning.get() && stopRequested.compareAndSet(false, true)) {
             nativeQuit()
         }
     }
 
-    fun isActive(): Boolean = isRunning
+    fun isActive(): Boolean = isRunning.get()
 
     /**
      * Writes the YAML config hev-socks5-tunnel expects. This is a separate
