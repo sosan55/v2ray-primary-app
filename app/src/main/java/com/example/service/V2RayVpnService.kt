@@ -240,11 +240,28 @@ class V2RayVpnService : VpnService() {
 
                 if (coroutineContext.isActive && xrayProcess != null) {
                     repository.log("XRAY-CORE", "ERROR", "Core exited code: $exitCode.")
+
+                    // پاکسازی کامل: بدون این‌ها TUN باز می‌مونه و کل ترافیک گوشی
+                    // تو یه سیاه‌چاله گم می‌شه چون نه core زنده‌ست نه hev-tunnel
                     HevSocks5Tunnel.stop()
+                    hevTunnelThread?.join(2000)
+                    hevTunnelThread = null
+                    xrayProcess = null
+
+                    try {
+                        interfaceDescriptor?.close()
+                    } catch (e: Exception) {
+                        repository.log("INTERFACE", "WARNING", "Close error on crash cleanup: ${e.localizedMessage}")
+                    }
+                    interfaceDescriptor = null
+
                     withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                        VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
                         VpnCoreManager.activeVpnCoreManager?.stopTracking()
                     }
+
+                    stopSelf()
                 }
             } catch (e: Throwable) {
                 repository.log("XRAY-CORE", "ERROR", "Exception execution: ${e.localizedMessage ?: e.toString()}")
