@@ -130,6 +130,7 @@ class V2RayVpnService : VpnService() {
                     repository.log("TUNNEL", "SUCCESS", "Tun interface established.")
                 } else {
                     repository.log("TUNNEL", "ERROR", "VpnService.Builder returned null Interface.")
+                    throw IllegalStateException("Failed to establish TUN interface")
                 }
             } catch (e: Exception) {
                 repository.log("TUNNEL", "ERROR", "Tunnel build failed: ${e.localizedMessage}")
@@ -141,6 +142,14 @@ class V2RayVpnService : VpnService() {
             }
 
             val fdNum = interfaceDescriptor?.fd ?: -1
+            if (fdNum == -1) {
+                repository.log("TUNNEL", "ERROR", "Failed to obtain TUN file descriptor")
+                withContext(Dispatchers.Main) {
+                    VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
+                }
+                stopSelf()
+                return@launch
+            }
 
             try {
                 listOf("geoip.dat", "geosite.dat").forEach { filename ->
@@ -228,14 +237,22 @@ class V2RayVpnService : VpnService() {
                     HevSocks5Tunnel.writeConfig(hevConfigFile, XrayConfigGenerator.SOCKS_INBOUND_PORT)
 
                     hevTunnelThread = Thread({
-                        val exitCode = HevSocks5Tunnel.start(hevConfigFile.absolutePath, fdNum)
-                        serviceScope.launch {
-                            repository.log("HEV-TUNNEL", if (exitCode == 0) "INFO" else "ERROR", "hev loop status: $exitCode.")
+                        try {
+                            val exitCode = HevSocks5Tunnel.start(hevConfigFile.absolutePath, fdNum)
+                            serviceScope.launch {
+                                repository.log("HEV-TUNNEL", if (exitCode == 0) "INFO" else "ERROR", "hev loop status: $exitCode.")
+                            }
+                        } catch (e: Exception) {
+                            serviceScope.launch {
+                                repository.log("HEV-TUNNEL", "ERROR", "Native tunnel error: ${e.localizedMessage}")
+                            }
                         }
                     }, "hev-socks5-tunnel").apply {
                         isDaemon = true
                         start()
                     }
+                } else {
+                    repository.log("TUNNEL", "ERROR", "TUN FD is invalid (-1), cannot start hev-socks5-tunnel")
                 }
 
                 // NOTE: this call blocks the coroutine's underlying thread until
