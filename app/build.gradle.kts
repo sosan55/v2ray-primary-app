@@ -13,9 +13,6 @@ android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
-  // Pinned so the CMake ExternalProject build of hev-socks5-tunnel (see
-  // src/main/cpp/CMakeLists.txt) uses a consistent, known-good NDK/toolchain
-  // instead of whatever happens to be default on a given machine or runner.
   ndkVersion = "27.0.12077973"
 
   defaultConfig {
@@ -27,10 +24,6 @@ android {
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-    // Only building for arm64-v8a for now — matches the existing Xray-core
-    // download task, which only fetches the arm64-v8a binary. If you add
-    // other ABIs for Xray, add them here too or the app will crash on those
-    // devices when it can't find libhev-socks5-tunnel.so for their ABI.
     ndk {
       abiFilters += "arm64-v8a"
     }
@@ -110,15 +103,19 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
+
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
   }
+
   buildFeatures {
     compose = true
     buildConfig = true
   }
+
   testOptions { unitTests { isIncludeAndroidResources = true } }
+
   packaging {
     jniLibs {
       useLegacyPackaging = true
@@ -128,29 +125,16 @@ android {
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
 }
 
-// Some unused dependencies are commented out below instead of being removed.
-// This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
-  // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
-  // FIX: androidx.activity.compose alone does not reliably bring in
-  // androidx.activity.result.contract.ActivityResultContracts / ActivityResultLauncher
-  // on this version catalog setup. MainActivity.kt uses these classes directly,
-  // so we add the base activity artifact explicitly.
   implementation("androidx.activity:activity-ktx:1.10.1")
-  // implementation(libs.androidx.camera.camera2)
-  // implementation(libs.androidx.camera.core)
-  // implementation(libs.androidx.camera.lifecycle)
-  // implementation(libs.androidx.camera.view)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
@@ -158,23 +142,19 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
-  // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
-  // implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
-  // implementation(libs.firebase.ai)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
-  // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -184,22 +164,29 @@ dependencies {
   testImplementation(libs.roborazzi)
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)
+
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
+
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
+
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
 
+// ==================== Xray Core Download Task ====================
+
 tasks.register("downloadXrayCore") {
     group = "build setup"
-    description = "Downloads Xray core and assets, placing them in jniLibs and assets"
+    description = "Downloads Xray core and assets"
 
-    val xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-android-arm64-v8a.zip"
+    // تغییر نسخه به 1.8.23 برای رفع مشکل slice bounds
+    val xrayUrl = "https://github.com/XTLS/Xray-core/releases/download/v1.8.23/Xray-android-arm64-v8a.zip"
+    
     val jniLibFile = file("src/main/jniLibs/arm64-v8a/libxray.so")
     val geoipFile = file("src/main/assets/geoip.dat")
     val geositeFile = file("src/main/assets/geosite.dat")
@@ -208,14 +195,15 @@ tasks.register("downloadXrayCore") {
     outputs.files(jniLibFile, geoipFile, geositeFile)
 
     doLast {
-        val needsDownload = !jniLibFile.exists() || !geoipFile.exists() || !geositeFile.exists()
+        val needsDownload = true  // Force download برای تست - بعداً می‌تونی برگردونی به شرط قبلی
+
         if (needsDownload) {
             jniLibFile.parentFile.mkdirs()
             geoipFile.parentFile.mkdirs()
             val tempZip = file("build/tmp/Xray-android-arm64-v8a.zip")
             tempZip.parentFile.mkdirs()
             
-            println("Downloading Xray package from $xrayUrl ...")
+            println("Downloading Xray v1.8.23 from $xrayUrl ...")
             try {
                 URL(xrayUrl).openStream().use { input ->
                     tempZip.outputStream().use { output ->
@@ -227,28 +215,18 @@ tasks.register("downloadXrayCore") {
                     when (extractedFile.name) {
                         "xray" -> {
                             extractedFile.copyTo(jniLibFile, overwrite = true)
-                            println("Extracted xray core binary to $jniLibFile")
+                            println("Extracted xray core to $jniLibFile")
                         }
-                        "geoip.dat" -> {
-                            extractedFile.copyTo(geoipFile, overwrite = true)
-                            println("Extracted geoip.dat to $geoipFile")
-                        }
-                        "geosite.dat" -> {
-                            extractedFile.copyTo(geositeFile, overwrite = true)
-                            println("Extracted geosite.dat to $geositeFile")
-                        }
+                        "geoip.dat" -> extractedFile.copyTo(geoipFile, overwrite = true)
+                        "geosite.dat" -> extractedFile.copyTo(geositeFile, overwrite = true)
                     }
                 }
-            } catch (e: java.lang.Exception) {
-                println("Error during download or extraction of Xray: ${e.message}")
+            } catch (e: Exception) {
+                println("Error downloading Xray: ${e.message}")
                 throw e
             } finally {
-                if (tempZip.exists()) {
-                    tempZip.delete()
-                }
+                if (tempZip.exists()) tempZip.delete()
             }
-        } else {
-            println("Xray core binary and geodata files already exist. Skipping download.")
         }
     }
 }
