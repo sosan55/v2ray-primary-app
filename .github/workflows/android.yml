@@ -24,13 +24,18 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Remove corrupt Gradle wrapper
-        run: rm -f gradle/wrapper/gradle-wrapper.jar
+      - name: Remove corrupt Gradle files
+        run: |
+          rm -f gradle/wrapper/gradle-wrapper.jar
+          rm -rf .gradle
+          rm -rf app/build
 
       - name: Regenerate Gradle Wrapper
-        run: ./gradlew wrapper --gradle-version 8.10 --distribution-type bin --no-daemon || true
+        run: |
+          curl -L -o gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.10/gradle/wrapper/gradle-wrapper.jar
+          chmod +x ./gradlew
 
-      - name: Make Gradle wrapper executable
+      - name: Make Gradle wrapper executable again
         run: chmod +x ./gradlew
 
       - name: Cache Gradle
@@ -41,8 +46,8 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
 
-      - name: Clean Project Completely
-        run: ./gradlew clean cleanBuildCache --no-daemon
+      - name: Clean Project
+        run: ./gradlew clean cleanBuildCache --no-daemon || true
 
       - name: Generate debug keystore
         run: |
