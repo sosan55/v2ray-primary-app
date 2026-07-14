@@ -24,18 +24,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Remove corrupt Gradle files
+      - name: Fix Gradle Wrapper Completely
         run: |
-          rm -f gradle/wrapper/gradle-wrapper.jar
-          rm -rf .gradle
-          rm -rf app/build
-
-      - name: Regenerate Gradle Wrapper
-        run: |
+          rm -rf gradle/wrapper/
+          mkdir -p gradle/wrapper
           curl -L -o gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.10/gradle/wrapper/gradle-wrapper.jar
+          curl -L -o gradle/wrapper/gradle-wrapper.properties https://github.com/gradle/gradle/raw/v8.10/gradle/wrapper/gradle-wrapper.properties
           chmod +x ./gradlew
 
-      - name: Make Gradle wrapper executable again
+      - name: Make Gradle executable
         run: chmod +x ./gradlew
 
       - name: Cache Gradle
