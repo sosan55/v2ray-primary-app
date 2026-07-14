@@ -5,13 +5,6 @@ import java.io.File
 
 object XrayConfigGenerator {
 
-    // Xray-core has no "tun" inbound protocol — confirmed against the official
-    // Xray-core source and infra/conf parser (unknown config / exit code 23 if
-    // attempted). TUN termination is handled entirely outside Xray by
-    // hev-socks5-tunnel, which reads/writes the raw TUN fd and forwards traffic
-    // into the "socks-in" inbound below over loopback. Xray only ever sees
-    // ordinary SOCKS5 connections on 127.0.0.1:10808 — it has no awareness of
-    // the VPN/TUN layer at all.
     const val SOCKS_INBOUND_PORT = 10808
 
     fun generate(server: ServerEntity, filesDir: File? = null): String {
@@ -23,16 +16,6 @@ object XrayConfigGenerator {
             else -> generateFreedomOutbound()
         }
 
-        // Safety verification: only append geoip strings if the geoip.dat file actually
-        // exists, to prevent a core crash from a missing/corrupt file.
-        //
-        // NOTE: We intentionally do NOT reference "geosite:ir" here. The geosite.dat
-        // bundled with official Xray-core releases does not include an "ir" domain
-        // category (confirmed: https://github.com/XTLS/Xray-core/issues/1406 —
-        // "we couldn't use category-ir in Iran using xray"). Referencing it causes
-        // Xray-core to fail parsing the config at startup:
-        //   "infra/conf: failed to parse ...domain rule: geosite:ir"
-        // The regexp rules below already cover .ir domains without needing that category.
         val hasGeoip = filesDir != null && File(filesDir, "geoip.dat").exists()
 
         val routingRules = """
@@ -70,6 +53,14 @@ object XrayConfigGenerator {
           },
         """.trimIndent()
 
+        // Sniffing بدون quic — رفع مشکل slice bounds out of range
+        val sniffingConfig = """
+          "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls"]
+          }
+        """.trimIndent()
+
         return """
         {
           "log": {
@@ -86,20 +77,14 @@ object XrayConfigGenerator {
                 "auth": "noauth",
                 "udp": true
               },
-              "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
-              }
+              $sniffingConfig
             },
             {
               "port": 10809,
               "listen": "127.0.0.1",
               "protocol": "http",
               "settings": {},
-              "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
-              }
+              $sniffingConfig
             }
           ],
           "outbounds": [
