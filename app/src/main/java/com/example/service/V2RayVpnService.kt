@@ -96,7 +96,7 @@ class V2RayVpnService : VpnService() {
             val repository = V2RayRepository(db)
             val server = repository.getSelectedServer()
 
-            if (server == null) {
+if (server == null) {
                 repository.log("VPN", "ERROR", "Cannot start VPN: No active server selected.")
                 withContext(Dispatchers.Main) {
                     VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
@@ -112,11 +112,14 @@ class V2RayVpnService : VpnService() {
 
                 val builder = Builder()
                     .setSession("V2RayDan")
-                    .addAddress("172.19.0.1", 30) 
-                    .addRoute("0.0.0.0", 0)       
-                    .addDnsServer("1.1.1.1")      
-                    .addDnsServer("8.8.8.8")      
-                    .setMtu(1500)                 
+                    .addAddress("172.19.0.1", 30)
+                    .addRoute("0.0.0.0", 0)       // IPv4 routing
+                    .addRoute("::/0", 0)          // IPv6 routing (FIXED)
+                    .addDnsServer("1.1.1.1")      // Cloudflare IPv4
+                    .addDnsServer("8.8.8.8")      // Google IPv4
+                    .addDnsServer("2606:4700:4700::1111") // Cloudflare IPv6 (FIXED)
+                    .addDnsServer("2001:4860:4860::8888") // Google IPv6 (FIXED)
+                    .setMtu(1500)
 
                 try {
                     builder.addDisallowedApplication(packageName)
@@ -181,7 +184,7 @@ class V2RayVpnService : VpnService() {
                 commandList.add("-config")
                 commandList.add(configFile.absolutePath)
 
-                val processBuilder = ProcessBuilder()
+val processBuilder = ProcessBuilder()
                     .command(commandList)
                     .redirectErrorStream(true)
 
@@ -202,8 +205,8 @@ class V2RayVpnService : VpnService() {
                         line = withContext(Dispatchers.IO) { reader.readLine() }
                         if (line == null) break
                         if (line.isNotBlank()) {
-                            val isNoisy = line.contains("tcp:") || line.contains("udp:") || line.contains("email:") || line.contains("accepted") || line.contains("127.0.0.1:")
-                            if (!isNoisy || line.contains("warning", ignoreCase = true) || line.contains("error", ignoreCase = true)) {
+                            val isNoisy = line.contains("tcp:")  line.contains("udp:")  line.contains("email:")  line.contains("accepted")  line.contains("127.0.0.1:")
+                            if (!isNoisy  line.contains("warning", ignoreCase = true)  line.contains("error", ignoreCase = true)) {
                                 val trimmedLine = if (line.length > 200) line.take(200) + "..." else line
                                 repository.log("XRAY-CORE", if (line.contains("error", ignoreCase = true)) "ERROR" else "INFO", trimmedLine)
                             }
@@ -254,7 +257,8 @@ class V2RayVpnService : VpnService() {
                 if (coroutineContext.isActive) {
                     repository.log("XRAY-CORE", "ERROR", "Core exited code: $exitCode.")
                     performCleanup(repository)
-                    withContext(Dispatchers.Main) {
+
+withContext(Dispatchers.Main) {
                         VpnCoreManager.activeVpnCoreManager?.updateState(VpnState.ERROR)
                         VpnCoreManager.activeVpnCoreManager?.setConnectedServer(null)
                         VpnCoreManager.activeVpnCoreManager?.stopTracking()
@@ -314,9 +318,39 @@ class V2RayVpnService : VpnService() {
                 return@withLock
             }
 
+            // --- HEV Tunnel Cleanup (FIXED: robust thread shutdown) ---
             try {
                 HevSocks5Tunnel.stop()
-                hevTunnelThread?.join(2000)
+                
+                // Attempt graceful join with timeout
+                try {
+                    val joined = if (hevTunnelThread != null) {
+                        try {
+                            hevTunnelThread!!.join(2000)
+                            true
+                        } catch (e: InterruptedException) {
+                            Log.w("TUNNEL", "Interrupted while joining tunnel thread: ${e.localizedMessage}")
+                            false
+                        }
+                    } else {
+                        true
+                    }
+                    
+                    // If thread didn't exit after timeout, interrupt it
+                    if (!joined && hevTunnelThread != null && hevTunnelThread!!.isAlive) {
+                        Log.w("TUNNEL", "Thread join timeout, interrupting tunnel thread...")
+                        hevTunnelThread!!.interrupt()
+                        try {
+                            hevTunnelThread!!.join(500) // Give it 500ms to respond to interrupt
+
+} catch (e: InterruptedException) {
+                            Log.w("TUNNEL", "Interrupted during forced shutdown")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("TUNNEL", "Error during thread join: ${e.localizedMessage}")
+                    repository?.log("TUNNEL", "ERROR", "Thread join error: ${e.localizedMessage}")
+                }
             } catch (e: Exception) {
                 Log.e("TUNNEL", "Stop error: ${e.localizedMessage}")
                 repository?.log("TUNNEL", "ERROR", "Stop error: ${e.localizedMessage}")
@@ -324,23 +358,50 @@ class V2RayVpnService : VpnService() {
                 hevTunnelThread = null
             }
 
+            // --- Xray Process Cleanup ---
             try {
-                xrayProcess?.destroy()
+                if (xrayProcess != null) {
+                    try {
+                        xrayProcess!!.destroy()
+                        // Give process time to exit gracefully
+                        try {
+                            xrayProcess!!.waitFor(1000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        } catch (e: Exception) {
+                            // If waitFor times out or fails, force kill
+                            Log.w("CORE", "Process waitFor timeout, forcing destruction")
+                            xrayProcess!!.destroyForcibly()
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CORE", "Process destroy error: ${e.localizedMessage}")
+                        repository?.log("CORE", "ERROR", "Destroy error: ${e.localizedMessage}")
+                    }
+                }
             } catch (e: Exception) {
-                Log.e("CORE", "Destroy error: ${e.localizedMessage}")
-                repository?.log("CORE", "ERROR", "Destroy error: ${e.localizedMessage}")
+                Log.e("CORE", "Xray cleanup exception: ${e.localizedMessage}")
+                repository?.log("CORE", "ERROR", "Xray cleanup error: ${e.localizedMessage}")
             } finally {
                 xrayProcess = null
             }
 
+            // --- TUN Interface Cleanup ---
             try {
-                interfaceDescriptor?.close()
+                if (interfaceDescriptor != null) {
+                    try {
+                        interfaceDescriptor!!.close()
+                        Log.d("INTERFACE", "TUN interface closed successfully")
+                    } catch (e: Exception) {
+                        Log.e("INTERFACE", "Close error: ${e.localizedMessage}")
+                        repository?.log("INTERFACE", "ERROR", "Close error: ${e.localizedMessage}")
+                    }
+                }
             } catch (e: Exception) {
-                Log.e("INTERFACE", "Close error: ${e.localizedMessage}")
-                repository?.log("INTERFACE", "ERROR", "Close error: ${e.localizedMessage}")
+                Log.e("INTERFACE", "Interface cleanup exception: ${e.localizedMessage}")
+                repository?.log("INTERFACE", "ERROR", "Interface cleanup error: ${e.localizedMessage}")
             } finally {
                 interfaceDescriptor = null
             }
+
+            repository?.log("SYSTEM", "INFO", "Cleanup completed successfully")
         }
     }
 
@@ -371,7 +432,7 @@ class V2RayVpnService : VpnService() {
         }
     }
 
-    override fun onDestroy() {
+override fun onDestroy() {
         // Fire-and-forget cleanup on service teardown. If a stopVpn()/
         // performCleanup() call is already in flight from ACTION_STOP, this
         // one will just block on the mutex, see cleanupDone == true, and
