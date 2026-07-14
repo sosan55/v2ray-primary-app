@@ -113,12 +113,12 @@ class V2RayVpnService : VpnService() {
                 val builder = Builder()
                     .setSession("V2RayDan")
                     .addAddress("172.19.0.1", 30)
-                    .addRoute("0.0.0.0", 0)       // IPv4 routing
-                    .addRoute("::/0", 0)          // IPv6 routing (FIXED)
-                    .addDnsServer("1.1.1.1")      // Cloudflare IPv4
-                    .addDnsServer("8.8.8.8")      // Google IPv4
-                    .addDnsServer("2606:4700:4700::1111") // Cloudflare IPv6 (FIXED)
-                    .addDnsServer("2001:4860:4860::8888") // Google IPv6 (FIXED)
+                    .addRoute("0.0.0.0", 0)           // IPv4: route all traffic through VPN
+                    .addRoute("2000::", 3)            // IPv6: route 2000::/3 through VPN
+                    .addDnsServer("1.1.1.1")          // Cloudflare IPv4
+                    .addDnsServer("8.8.8.8")          // Google IPv4
+                    .addDnsServer("2606:4700:4700::1111") // Cloudflare IPv6
+                    .addDnsServer("2001:4860:4860::8888") // Google IPv6
                     .setMtu(1500)
 
                 try {
