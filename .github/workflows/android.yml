@@ -24,12 +24,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Fix Gradle Wrapper Completely
+      - name: Fix Gradle Wrapper (Full Reset)
         run: |
-          rm -rf gradle/wrapper/
+          rm -rf gradle/
           mkdir -p gradle/wrapper
           curl -L -o gradle/wrapper/gradle-wrapper.jar https://github.com/gradle/gradle/raw/v8.10/gradle/wrapper/gradle-wrapper.jar
           curl -L -o gradle/wrapper/gradle-wrapper.properties https://github.com/gradle/gradle/raw/v8.10/gradle/wrapper/gradle-wrapper.properties
+          echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
+          echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+          echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
           chmod +x ./gradlew
 
       - name: Make Gradle executable
